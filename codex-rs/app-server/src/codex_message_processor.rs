@@ -79,6 +79,7 @@ use codex_core::config_edit::persist_overrides_and_clear_if_none;
 use codex_core::default_client::get_codex_user_agent;
 use codex_core::exec::ExecParams;
 use codex_core::exec_env::create_env;
+use codex_core::get_platform_sandbox;
 use codex_core::git_info::git_diff_to_remote;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::Event;
