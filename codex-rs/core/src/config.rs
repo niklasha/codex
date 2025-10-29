@@ -130,6 +130,9 @@ pub struct Config {
     /// Base instructions override.
     pub base_instructions: Option<String>,
 
+    /// Developer instructions override injected as a separate message.
+    pub developer_instructions: Option<String>,
+
     /// Optional external notifier command. When set, Codex will spawn this
     /// program after each completed *turn* (i.e. when the agent finishes
     /// processing a user submission). The value must be the full command
@@ -869,8 +872,9 @@ pub struct ConfigToml {
     #[serde(default)]
     pub notify: Option<Vec<String>>,
 
-    /// System instructions.
-    pub instructions: Option<String>,
+    /// Developer instructions inserted as a `developer` role message.
+    #[serde(default, alias = "instructions")]
+    pub developer_instructions: Option<String>,
 
     /// When set, restricts ChatGPT login to a specific workspace identifier.
     #[serde(default)]
@@ -1155,6 +1159,7 @@ pub struct ConfigOverrides {
     pub config_profile: Option<String>,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
     pub base_instructions: Option<String>,
+    pub developer_instructions: Option<String>,
     pub include_apply_patch_tool: Option<bool>,
     pub include_view_image_tool: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
@@ -1185,6 +1190,7 @@ impl Config {
             config_profile: config_profile_key,
             codex_linux_sandbox_exe,
             base_instructions,
+            developer_instructions,
             include_apply_patch_tool: include_apply_patch_tool_override,
             include_view_image_tool: include_view_image_tool_override,
             show_raw_agent_reasoning,
@@ -1371,6 +1377,9 @@ impl Config {
         let file_base_instructions =
             Self::get_base_instructions(experimental_instructions_path, &resolved_cwd)?;
         let base_instructions = base_instructions.or(file_base_instructions);
+        let developer_instructions = developer_instructions
+            .or(cfg.developer_instructions)
+            .or_else(|| model_family.developer_instructions.clone());
 
         // Default review model when not set in config; allow CLI override to take precedence.
         let review_model = override_review_model
@@ -1395,6 +1404,7 @@ impl Config {
             notify: cfg.notify,
             user_instructions,
             base_instructions,
+            developer_instructions,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
             cli_auth_credentials_store_mode: cfg.cli_auth_credentials_store.unwrap_or_default(),
@@ -3100,6 +3110,7 @@ model_verbosity = "high"
                 model_verbosity: None,
                 chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
                 base_instructions: None,
+                developer_instructions: None,
                 forced_chatgpt_workspace_id: None,
                 forced_login_method: None,
                 include_apply_patch_tool: false,
@@ -3171,6 +3182,7 @@ model_verbosity = "high"
             model_verbosity: None,
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
+            developer_instructions: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
@@ -3257,6 +3269,7 @@ model_verbosity = "high"
             model_verbosity: None,
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
+            developer_instructions: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,
@@ -3329,6 +3342,7 @@ model_verbosity = "high"
             model_verbosity: Some(Verbosity::High),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             base_instructions: None,
+            developer_instructions: None,
             forced_chatgpt_workspace_id: None,
             forced_login_method: None,
             include_apply_patch_tool: false,

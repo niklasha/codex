@@ -380,6 +380,7 @@ async fn includes_base_instructions_override_in_request() {
     let mut config = load_default_config_for_test(&codex_home);
 
     config.base_instructions = Some("test instructions".to_string());
+    config.developer_instructions = Some("developer guidance".to_string());
     config.model_provider = model_provider;
 
     let conversation_manager =
@@ -409,6 +410,38 @@ async fn includes_base_instructions_override_in_request() {
             .as_str()
             .unwrap()
             .contains("test instructions")
+    );
+
+    let input = request_body["input"]
+        .as_array()
+        .expect("request input should be an array");
+    let first_item = input
+        .first()
+        .expect("developer instructions message should be present");
+    assert_eq!(
+        first_item.get("type").and_then(|v| v.as_str()),
+        Some("message")
+    );
+    assert_eq!(
+        first_item.get("role").and_then(|v| v.as_str()),
+        Some("developer")
+    );
+    let content = first_item
+        .get("content")
+        .and_then(|v| v.as_array())
+        .expect("developer message content should be an array");
+    let developer_text = content
+        .first()
+        .and_then(|item| item.get("text"))
+        .and_then(|value| value.as_str())
+        .expect("developer message content text missing");
+    assert!(
+        developer_text.contains("<developer_instructions>"),
+        "expected serialized developer instructions, got `{developer_text}`"
+    );
+    assert!(
+        developer_text.contains("developer guidance"),
+        "expected developer instructions body to match override"
     );
 }
 

@@ -3,6 +3,8 @@ use serde::Serialize;
 
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::DEVELOPER_INSTRUCTIONS_CLOSE_TAG;
+use codex_protocol::protocol::DEVELOPER_INSTRUCTIONS_OPEN_TAG;
 use codex_protocol::protocol::USER_INSTRUCTIONS_CLOSE_TAG;
 use codex_protocol::protocol::USER_INSTRUCTIONS_OPEN_TAG;
 
@@ -36,6 +38,37 @@ impl From<UserInstructions> for ResponseItem {
             role: "user".to_string(),
             content: vec![ContentItem::InputText {
                 text: ui.serialize_to_xml(),
+            }],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename = "developer_instructions", rename_all = "snake_case")]
+pub(crate) struct DeveloperInstructions {
+    text: String,
+}
+
+impl DeveloperInstructions {
+    pub fn new<T: Into<String>>(text: T) -> Self {
+        Self { text: text.into() }
+    }
+
+    pub fn serialize_to_xml(self) -> String {
+        format!(
+            "{DEVELOPER_INSTRUCTIONS_OPEN_TAG}\n\n{}\n\n{DEVELOPER_INSTRUCTIONS_CLOSE_TAG}",
+            self.text
+        )
+    }
+}
+
+impl From<DeveloperInstructions> for ResponseItem {
+    fn from(di: DeveloperInstructions) -> Self {
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: di.serialize_to_xml(),
             }],
         }
     }

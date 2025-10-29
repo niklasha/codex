@@ -341,6 +341,7 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
         .send_codex_tool_call(CodexToolCallParam {
             prompt: "How are you?".to_string(),
             base_instructions: Some("You are a helpful assistant.".to_string()),
+            developer_instructions: Some("Foreshadow upcoming tool calls.".to_string()),
             ..Default::default()
         })
         .await?;
@@ -370,6 +371,27 @@ async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
     let request = requests[0].body_json::<serde_json::Value>().unwrap();
     let instructions = request["messages"][0]["content"].as_str().unwrap();
     assert!(instructions.starts_with("You are a helpful assistant."));
+
+    let developer_msg = request["messages"]
+        .as_array()
+        .and_then(|messages| {
+            messages
+                .iter()
+                .find(|msg| msg.get("role").and_then(|role| role.as_str()) == Some("developer"))
+        })
+        .expect("developer message should be present when developer instructions provided");
+    let developer_content = developer_msg
+        .get("content")
+        .and_then(|value| value.as_str())
+        .expect("developer message content should be text");
+    assert!(
+        developer_content.contains("<developer_instructions>"),
+        "expected developer instructions tag, got `{developer_content}`"
+    );
+    assert!(
+        developer_content.contains("Foreshadow upcoming tool calls."),
+        "developer instructions did not include override text"
+    );
 
     Ok(())
 }

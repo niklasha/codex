@@ -39,6 +39,16 @@ fn text_user_input(text: String) -> serde_json::Value {
     })
 }
 
+fn remove_developer_messages(value: &serde_json::Value) -> Vec<serde_json::Value> {
+    value
+        .as_array()
+        .expect("input should be an array")
+        .iter()
+        .filter(|item| item.get("role").and_then(|role| role.as_str()) != Some("developer"))
+        .cloned()
+        .collect()
+}
+
 fn default_env_context_str(cwd: &str, shell: &Shell) -> String {
     format!(
         r#"<environment_context>
@@ -377,9 +387,14 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
         "content": [ { "type": "input_text", "text": "hello 1" } ]
     });
     let body1 = requests[0].body_json::<serde_json::Value>().unwrap();
+    let input_without_developer = remove_developer_messages(&body1["input"]);
     assert_eq!(
-        body1["input"],
-        serde_json::json!([expected_ui_msg, expected_env_msg, expected_user_message_1])
+        input_without_developer,
+        vec![
+            expected_ui_msg.clone(),
+            expected_env_msg.clone(),
+            expected_user_message_1.clone()
+        ]
     );
 
     let expected_user_message_2 = serde_json::json!({
@@ -388,14 +403,16 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
         "content": [ { "type": "input_text", "text": "hello 2" } ]
     });
     let body2 = requests[1].body_json::<serde_json::Value>().unwrap();
-    let expected_body2 = serde_json::json!(
-        [
-            body1["input"].as_array().unwrap().as_slice(),
-            [expected_user_message_2].as_slice(),
+    let input2_without_developer = remove_developer_messages(&body2["input"]);
+    assert_eq!(
+        input2_without_developer,
+        vec![
+            expected_ui_msg,
+            expected_env_msg,
+            expected_user_message_1,
+            expected_user_message_2
         ]
-        .concat()
     );
-    assert_eq!(body2["input"], expected_body2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -516,14 +533,10 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() {
         "role": "user",
         "content": [ { "type": "input_text", "text": expected_env_text_2 } ]
     });
-    let expected_body2 = serde_json::json!(
-        [
-            body1["input"].as_array().unwrap().as_slice(),
-            [expected_env_msg_2, expected_user_message_2].as_slice(),
-        ]
-        .concat()
-    );
-    assert_eq!(body2["input"], expected_body2);
+    let mut expected_body2 = remove_developer_messages(&body1["input"]);
+    expected_body2.push(expected_env_msg_2.clone());
+    expected_body2.push(expected_user_message_2.clone());
+    assert_eq!(remove_developer_messages(&body2["input"]), expected_body2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -640,14 +653,10 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() {
         "role": "user",
         "content": [ { "type": "input_text", "text": expected_env_text_2 } ]
     });
-    let expected_body2 = serde_json::json!(
-        [
-            body1["input"].as_array().unwrap().as_slice(),
-            [expected_env_msg_2, expected_user_message_2].as_slice(),
-        ]
-        .concat()
-    );
-    assert_eq!(body2["input"], expected_body2);
+    let mut expected_body2 = remove_developer_messages(&body1["input"]);
+    expected_body2.push(expected_env_msg_2.clone());
+    expected_body2.push(expected_user_message_2.clone());
+    assert_eq!(remove_developer_messages(&body2["input"]), expected_body2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -747,21 +756,21 @@ async fn send_user_turn_with_no_changes_does_not_send_environment_context() {
     ));
     let expected_user_message_1 = text_user_input("hello 1".to_string());
 
-    let expected_input_1 = serde_json::Value::Array(vec![
+    let expected_input_1 = vec![
         expected_ui_msg.clone(),
         expected_env_msg_1.clone(),
         expected_user_message_1.clone(),
-    ]);
-    assert_eq!(body1["input"], expected_input_1);
+    ];
+    assert_eq!(remove_developer_messages(&body1["input"]), expected_input_1);
 
     let expected_user_message_2 = text_user_input("hello 2".to_string());
-    let expected_input_2 = serde_json::Value::Array(vec![
+    let expected_input_2 = vec![
         expected_ui_msg,
         expected_env_msg_1,
         expected_user_message_1,
         expected_user_message_2,
-    ]);
-    assert_eq!(body2["input"], expected_input_2);
+    ];
+    assert_eq!(remove_developer_messages(&body2["input"]), expected_input_2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -861,12 +870,12 @@ async fn send_user_turn_with_changes_sends_environment_context() {
     let expected_env_text_1 = default_env_context_str(&default_cwd.to_string_lossy(), &shell);
     let expected_env_msg_1 = text_user_input(expected_env_text_1);
     let expected_user_message_1 = text_user_input("hello 1".to_string());
-    let expected_input_1 = serde_json::Value::Array(vec![
+    let expected_input_1 = vec![
         expected_ui_msg.clone(),
         expected_env_msg_1.clone(),
         expected_user_message_1.clone(),
-    ]);
-    assert_eq!(body1["input"], expected_input_1);
+    ];
+    assert_eq!(remove_developer_messages(&body1["input"]), expected_input_1);
 
     let expected_env_msg_2 = text_user_input(
         r#"<environment_context>
@@ -877,14 +886,14 @@ async fn send_user_turn_with_changes_sends_environment_context() {
             .to_string(),
     );
     let expected_user_message_2 = text_user_input("hello 2".to_string());
-    let expected_input_2 = serde_json::Value::Array(vec![
+    let expected_input_2 = vec![
         expected_ui_msg,
         expected_env_msg_1,
         expected_user_message_1,
         expected_env_msg_2,
         expected_user_message_2,
-    ]);
-    assert_eq!(body2["input"], expected_input_2);
+    ];
+    assert_eq!(remove_developer_messages(&body2["input"]), expected_input_2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

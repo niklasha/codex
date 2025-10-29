@@ -46,6 +46,9 @@ pub struct ModelFamily {
     // Instructions to use for querying the model
     pub base_instructions: String,
 
+    /// Developer role instructions to inject alongside the base instructions.
+    pub developer_instructions: Option<String>,
+
     /// Names of beta tools that should be exposed to this model family.
     pub experimental_supported_tools: Vec<String>,
 
@@ -74,6 +77,7 @@ macro_rules! model_family {
             supports_parallel_tool_calls: false,
             apply_patch_tool_type: None,
             base_instructions: BASE_INSTRUCTIONS.to_string(),
+            developer_instructions: None,
             experimental_supported_tools: Vec::new(),
             effective_context_window_percent: 95,
             support_verbosity: false,
@@ -185,6 +189,7 @@ pub fn derive_default_model_family(model: &str) -> ModelFamily {
         supports_parallel_tool_calls: false,
         apply_patch_tool_type: None,
         base_instructions: BASE_INSTRUCTIONS.to_string(),
+        developer_instructions: None,
         experimental_supported_tools: Vec::new(),
         effective_context_window_percent: 95,
         support_verbosity: false,

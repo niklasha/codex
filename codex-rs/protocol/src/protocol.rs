@@ -44,6 +44,8 @@ pub use crate::approvals::SandboxRiskLevel;
 /// duplicated hardcoded strings.
 pub const USER_INSTRUCTIONS_OPEN_TAG: &str = "<user_instructions>";
 pub const USER_INSTRUCTIONS_CLOSE_TAG: &str = "</user_instructions>";
+pub const DEVELOPER_INSTRUCTIONS_OPEN_TAG: &str = "<developer_instructions>";
+pub const DEVELOPER_INSTRUCTIONS_CLOSE_TAG: &str = "</developer_instructions>";
 pub const ENVIRONMENT_CONTEXT_OPEN_TAG: &str = "<environment_context>";
 pub const ENVIRONMENT_CONTEXT_CLOSE_TAG: &str = "</environment_context>";
 pub const USER_MESSAGE_BEGIN: &str = "## My request for Codex:";

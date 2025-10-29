@@ -49,6 +49,10 @@ pub struct CodexToolCallParam {
     /// The set of instructions to use instead of the default ones.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_instructions: Option<String>,
+
+    /// Developer instructions that should be injected as a developer role message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub developer_instructions: Option<String>,
 }
 
 /// Custom enum mirroring [`AskForApproval`], but has an extra dependency on
@@ -141,6 +145,7 @@ impl CodexToolCallParam {
             sandbox,
             config: cli_overrides,
             base_instructions,
+            developer_instructions,
         } = self;
 
         // Build the `ConfigOverrides` recognized by codex-core.
@@ -154,6 +159,7 @@ impl CodexToolCallParam {
             model_provider: None,
             codex_linux_sandbox_exe,
             base_instructions,
+            developer_instructions,
             include_apply_patch_tool: None,
             include_view_image_tool: None,
             show_raw_agent_reasoning: None,
@@ -286,6 +292,10 @@ mod tests {
               },
               "base-instructions": {
                 "description": "The set of instructions to use instead of the default ones.",
+                "type": "string"
+              },
+              "developer-instructions": {
+                "description": "Developer instructions that should be injected as a developer role message.",
                 "type": "string"
               },
             },
