@@ -81,7 +81,7 @@ impl ServerOptions {
                     })
                     .ok()
             })
-            .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::LOCALHOST));
+            .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
         Self {
             codex_home,
             client_id,
@@ -200,6 +200,15 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
         })
     };
 
+    let request_context = RequestContext {
+        issuer: opts.issuer.clone(),
+        client_id: opts.client_id.clone(),
+        codex_home: opts.codex_home.clone(),
+        forced_chatgpt_workspace_id: opts.forced_chatgpt_workspace_id.clone(),
+        cli_auth_credentials_store_mode: opts.cli_auth_credentials_store_mode,
+    };
+    let bind_address = opts.bind_address;
+
     let shutdown_notify = Arc::new(tokio::sync::Notify::new());
     let server_handle = {
         let shutdown_notify = shutdown_notify.clone();
@@ -209,6 +218,7 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
         let success_path_for_server = success_path;
         let cancel_path_for_server = cancel_path;
         let success_url_for_server = success_url;
+        let request_context = request_context.clone();
         tokio::spawn(async move {
             let result = loop {
                 tokio::select! {
@@ -229,7 +239,7 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
                         };
                         let response = process_request(
                             &url_raw,
-                            &opts,
+                            &request_context,
                             &redirect_uri_for_server,
                             redirect_targets,
                             &pkce,
@@ -278,6 +288,7 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
         auth_url,
         actual_port,
         redirect_uri,
+        bind_address,
         server_handle,
         shutdown_handle: ShutdownHandle { shutdown_notify },
     })
@@ -318,6 +329,15 @@ struct RedirectTargets<'a> {
     success_url: &'a Url,
 }
 
+#[derive(Clone)]
+struct RequestContext {
+    issuer: String,
+    client_id: String,
+    codex_home: PathBuf,
+    forced_chatgpt_workspace_id: Option<String>,
+    cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
+}
+
 enum HandledRequest {
     Response(Response<Cursor<Vec<u8>>>),
     RedirectWithHeader(Header),
@@ -330,7 +350,7 @@ enum HandledRequest {
 
 async fn process_request(
     url_raw: &str,
-    opts: &ServerOptions,
+    context: &RequestContext,
     redirect_uri: &str,
     redirect_targets: RedirectTargets<'_>,
     pkce: &PkceCodes,
@@ -364,28 +384,34 @@ async fn process_request(
             }
         };
 
-        match exchange_code_for_tokens(&opts.issuer, &opts.client_id, redirect_uri, pkce, &code)
-            .await
+        match exchange_code_for_tokens(
+            &context.issuer,
+            &context.client_id,
+            redirect_uri,
+            pkce,
+            &code,
+        )
+        .await
         {
             Ok(tokens) => {
                 if let Err(message) = ensure_workspace_allowed(
-                    opts.forced_chatgpt_workspace_id.as_deref(),
+                    context.forced_chatgpt_workspace_id.as_deref(),
                     &tokens.id_token,
                 ) {
                     eprintln!("Workspace restriction error: {message}");
                     return login_error_response(&message);
                 }
                 // Obtain API key via token-exchange and persist
-                let api_key = obtain_api_key(&opts.issuer, &opts.client_id, &tokens.id_token)
+                let api_key = obtain_api_key(&context.issuer, &context.client_id, &tokens.id_token)
                     .await
                     .ok();
                 if let Err(err) = persist_tokens_async(
-                    &opts.codex_home,
+                    &context.codex_home,
                     api_key.clone(),
                     tokens.id_token.clone(),
                     tokens.access_token.clone(),
                     tokens.refresh_token.clone(),
-                    opts.cli_auth_credentials_store_mode,
+                    context.cli_auth_credentials_store_mode,
                 )
                 .await
                 {
@@ -398,7 +424,7 @@ async fn process_request(
 
                 let redirect_target = compose_success_url(
                     redirect_targets.success_url,
-                    &opts.issuer,
+                    &context.issuer,
                     &tokens.id_token,
                     &tokens.access_token,
                 );
