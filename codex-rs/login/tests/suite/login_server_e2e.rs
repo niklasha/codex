@@ -11,7 +11,9 @@ use codex_core::auth::AuthCredentialsStoreMode;
 use codex_login::ServerOptions;
 use codex_login::run_login_server;
 use core_test_support::skip_if_no_network;
+use reqwest::redirect::Policy;
 use tempfile::tempdir;
+use url::Url;
 
 // See spawn.rs for details
 
@@ -118,6 +120,7 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
         open_browser: false,
         force_state: Some(state),
         forced_chatgpt_workspace_id: Some(chatgpt_account_id.to_string()),
+        redirect_base_override: None,
     };
     let server = run_login_server(opts)?;
     assert!(
@@ -179,6 +182,7 @@ async fn creates_missing_codex_home_dir() -> Result<()> {
         open_browser: false,
         force_state: Some(state),
         forced_chatgpt_workspace_id: None,
+        redirect_base_override: None,
     };
     let server = run_login_server(opts)?;
     let login_port = server.actual_port;
@@ -218,6 +222,7 @@ async fn forced_chatgpt_workspace_id_mismatch_blocks_login() -> Result<()> {
         open_browser: false,
         force_state: Some(state.clone()),
         forced_chatgpt_workspace_id: Some("org-required".to_string()),
+        redirect_base_override: None,
     };
     let server = run_login_server(opts)?;
     assert!(
@@ -255,6 +260,70 @@ async fn forced_chatgpt_workspace_id_mismatch_blocks_login() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn honors_redirect_base_override() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let (issuer_addr, issuer_handle) = start_mock_issuer("org-override");
+    let issuer = format!("http://{}:{}", issuer_addr.ip(), issuer_addr.port());
+
+    let tmp = tempdir()?;
+    let codex_home = tmp.path().to_path_buf();
+    let state = "override-state".to_string();
+
+    let opts = ServerOptions {
+        codex_home: codex_home.clone(),
+        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+        client_id: codex_login::CLIENT_ID.to_string(),
+        issuer,
+        port: 0,
+        open_browser: false,
+        force_state: Some(state.clone()),
+        forced_chatgpt_workspace_id: None,
+        redirect_base_override: Some(
+            Url::parse("http://example.com/custom").expect("valid override"),
+        ),
+    };
+
+    let server = run_login_server(opts)?;
+    assert_eq!(
+        server.redirect_uri,
+        "http://example.com/custom/auth/callback"
+    );
+    let login_port = server.actual_port;
+
+    let client = reqwest::Client::builder()
+        .redirect(Policy::none())
+        .build()?;
+    let callback_url =
+        format!("http://127.0.0.1:{login_port}/custom/auth/callback?code=abc&state={state}");
+    let resp = client.get(&callback_url).send().await?;
+    assert_eq!(resp.status(), reqwest::StatusCode::FOUND);
+    let location = resp
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .expect("redirect location")
+        .to_str()?;
+    assert!(
+        location.starts_with("http://example.com/custom/success?"),
+        "success redirect should use external origin"
+    );
+
+    let success_resp = client
+        .get(format!("http://127.0.0.1:{login_port}/custom/success"))
+        .send()
+        .await?;
+    assert!(success_resp.status().is_success());
+
+    server.block_until_done().await?;
+
+    let auth_path = codex_home.join("auth.json");
+    assert!(auth_path.exists(), "auth.json should be written");
+
+    drop(issuer_handle);
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -274,6 +343,7 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         open_browser: false,
         force_state: Some("cancel_state".to_string()),
         forced_chatgpt_workspace_id: None,
+        redirect_base_override: None,
     };
 
     let first_server = run_login_server(first_opts)?;
@@ -294,6 +364,7 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
         open_browser: false,
         force_state: Some("cancel_state_2".to_string()),
         forced_chatgpt_workspace_id: None,
+        redirect_base_override: None,
     };
 
     let second_server = run_login_server(second_opts)?;

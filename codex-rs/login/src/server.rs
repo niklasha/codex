@@ -27,9 +27,11 @@ use tiny_http::Request;
 use tiny_http::Response;
 use tiny_http::Server;
 use tiny_http::StatusCode;
+use url::Url;
 
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const DEFAULT_PORT: u16 = 1455;
+const REDIRECT_URI_ENV_VAR: &str = "CODEX_LOGIN_REDIRECT_URI";
 
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
@@ -41,6 +43,7 @@ pub struct ServerOptions {
     pub force_state: Option<String>,
     pub forced_chatgpt_workspace_id: Option<String>,
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
+    pub redirect_base_override: Option<Url>,
 }
 
 impl ServerOptions {
@@ -50,6 +53,20 @@ impl ServerOptions {
         forced_chatgpt_workspace_id: Option<String>,
         cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
     ) -> Self {
+        let redirect_base_override = std::env::var(REDIRECT_URI_ENV_VAR).ok().and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                match Url::parse(trimmed) {
+                    Ok(url) => Some(url),
+                    Err(err) => {
+                        eprintln!("Ignoring {REDIRECT_URI_ENV_VAR} override '{trimmed}': {err}");
+                        None
+                    }
+                }
+            }
+        });
         Self {
             codex_home,
             client_id,
@@ -59,6 +76,7 @@ impl ServerOptions {
             force_state: None,
             forced_chatgpt_workspace_id,
             cli_auth_credentials_store_mode,
+            redirect_base_override,
         }
     }
 }
@@ -66,6 +84,7 @@ impl ServerOptions {
 pub struct LoginServer {
     pub auth_url: String,
     pub actual_port: u16,
+    pub redirect_uri: String,
     server_handle: tokio::task::JoinHandle<io::Result<()>>,
     shutdown_handle: ShutdownHandle,
 }
@@ -113,7 +132,28 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
     };
     let server = Arc::new(server);
 
-    let redirect_uri = format!("http://localhost:{actual_port}/auth/callback");
+    let base_url = if let Some(override_base) = &opts.redirect_base_override {
+        sanitize_base_url(override_base.clone())
+    } else {
+        sanitize_base_url(
+            Url::parse(&format!("http://localhost:{actual_port}/")).map_err(|err| {
+                io::Error::other(format!("failed to build default redirect base: {err}"))
+            })?,
+        )
+    };
+    let callback_url = base_url
+        .join("auth/callback")
+        .map_err(|err| io::Error::other(format!("invalid redirect base: {err}")))?;
+    let success_url = base_url
+        .join("success")
+        .map_err(|err| io::Error::other(format!("invalid redirect base: {err}")))?;
+    let cancel_url = base_url
+        .join("cancel")
+        .map_err(|err| io::Error::other(format!("invalid redirect base: {err}")))?;
+    let redirect_uri = callback_url.to_string();
+    let callback_path = callback_url.path().to_string();
+    let success_path = success_url.path().to_string();
+    let cancel_path = cancel_url.path().to_string();
     let auth_url = build_authorize_url(
         &opts.issuer,
         &opts.client_id,
@@ -146,6 +186,11 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
     let server_handle = {
         let shutdown_notify = shutdown_notify.clone();
         let server = server;
+        let redirect_uri_for_server = redirect_uri.clone();
+        let callback_path_for_server = callback_path;
+        let success_path_for_server = success_path;
+        let cancel_path_for_server = cancel_path;
+        let success_url_for_server = success_url;
         tokio::spawn(async move {
             let result = loop {
                 tokio::select! {
@@ -158,8 +203,21 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
                         };
 
                         let url_raw = req.url().to_string();
-                        let response =
-                            process_request(&url_raw, &opts, &redirect_uri, &pkce, actual_port, &state).await;
+                        let redirect_targets = RedirectTargets {
+                            callback_path: &callback_path_for_server,
+                            success_path: &success_path_for_server,
+                            cancel_path: &cancel_path_for_server,
+                            success_url: &success_url_for_server,
+                        };
+                        let response = process_request(
+                            &url_raw,
+                            &opts,
+                            &redirect_uri_for_server,
+                            redirect_targets,
+                            &pkce,
+                            &state,
+                        )
+                        .await;
 
                         let exit_result = match response {
                             HandledRequest::Response(response) => {
@@ -201,9 +259,31 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
     Ok(LoginServer {
         auth_url,
         actual_port,
+        redirect_uri,
         server_handle,
         shutdown_handle: ShutdownHandle { shutdown_notify },
     })
+}
+
+fn sanitize_base_url(mut url: Url) -> Url {
+    url.set_query(None);
+    url.set_fragment(None);
+    let path = url.path().to_string();
+    if path.is_empty() {
+        url.set_path("/");
+    } else if path != "/" && !path.ends_with('/') {
+        let mut new_path = path;
+        new_path.push('/');
+        url.set_path(&new_path);
+    }
+    url
+}
+
+struct RedirectTargets<'a> {
+    callback_path: &'a str,
+    success_path: &'a str,
+    cancel_path: &'a str,
+    success_url: &'a Url,
 }
 
 enum HandledRequest {
@@ -220,8 +300,8 @@ async fn process_request(
     url_raw: &str,
     opts: &ServerOptions,
     redirect_uri: &str,
+    redirect_targets: RedirectTargets<'_>,
     pkce: &PkceCodes,
-    actual_port: u16,
     state: &str,
 ) -> HandledRequest {
     let parsed_url = match url::Url::parse(&format!("http://localhost{url_raw}")) {
@@ -235,101 +315,100 @@ async fn process_request(
     };
     let path = parsed_url.path().to_string();
 
-    match path.as_str() {
-        "/auth/callback" => {
-            let params: std::collections::HashMap<String, String> =
-                parsed_url.query_pairs().into_owned().collect();
-            if params.get("state").map(String::as_str) != Some(state) {
+    if path == redirect_targets.callback_path {
+        let params: std::collections::HashMap<String, String> =
+            parsed_url.query_pairs().into_owned().collect();
+        if params.get("state").map(String::as_str) != Some(state) {
+            return HandledRequest::Response(
+                Response::from_string("State mismatch").with_status_code(400),
+            );
+        }
+        let code = match params.get("code") {
+            Some(c) if !c.is_empty() => c.clone(),
+            _ => {
                 return HandledRequest::Response(
-                    Response::from_string("State mismatch").with_status_code(400),
+                    Response::from_string("Missing authorization code").with_status_code(400),
                 );
             }
-            let code = match params.get("code") {
-                Some(c) if !c.is_empty() => c.clone(),
-                _ => {
-                    return HandledRequest::Response(
-                        Response::from_string("Missing authorization code").with_status_code(400),
-                    );
-                }
-            };
+        };
 
-            match exchange_code_for_tokens(&opts.issuer, &opts.client_id, redirect_uri, pkce, &code)
-                .await
-            {
-                Ok(tokens) => {
-                    if let Err(message) = ensure_workspace_allowed(
-                        opts.forced_chatgpt_workspace_id.as_deref(),
-                        &tokens.id_token,
-                    ) {
-                        eprintln!("Workspace restriction error: {message}");
-                        return login_error_response(&message);
-                    }
-                    // Obtain API key via token-exchange and persist
-                    let api_key = obtain_api_key(&opts.issuer, &opts.client_id, &tokens.id_token)
-                        .await
-                        .ok();
-                    if let Err(err) = persist_tokens_async(
-                        &opts.codex_home,
-                        api_key.clone(),
-                        tokens.id_token.clone(),
-                        tokens.access_token.clone(),
-                        tokens.refresh_token.clone(),
-                        opts.cli_auth_credentials_store_mode,
-                    )
-                    .await
-                    {
-                        eprintln!("Persist error: {err}");
-                        return HandledRequest::Response(
-                            Response::from_string(format!("Unable to persist auth file: {err}"))
-                                .with_status_code(500),
-                        );
-                    }
-
-                    let success_url = compose_success_url(
-                        actual_port,
-                        &opts.issuer,
-                        &tokens.id_token,
-                        &tokens.access_token,
-                    );
-                    match tiny_http::Header::from_bytes(&b"Location"[..], success_url.as_bytes()) {
-                        Ok(header) => HandledRequest::RedirectWithHeader(header),
-                        Err(_) => HandledRequest::Response(
-                            Response::from_string("Internal Server Error").with_status_code(500),
-                        ),
-                    }
-                }
-                Err(err) => {
-                    eprintln!("Token exchange error: {err}");
-                    HandledRequest::Response(
-                        Response::from_string(format!("Token exchange failed: {err}"))
-                            .with_status_code(500),
-                    )
-                }
-            }
-        }
-        "/success" => {
-            let body = include_str!("assets/success.html");
-            HandledRequest::ResponseAndExit {
-                headers: match Header::from_bytes(
-                    &b"Content-Type"[..],
-                    &b"text/html; charset=utf-8"[..],
+        match exchange_code_for_tokens(&opts.issuer, &opts.client_id, redirect_uri, pkce, &code)
+            .await
+        {
+            Ok(tokens) => {
+                if let Err(message) = ensure_workspace_allowed(
+                    opts.forced_chatgpt_workspace_id.as_deref(),
+                    &tokens.id_token,
                 ) {
-                    Ok(header) => vec![header],
-                    Err(_) => Vec::new(),
-                },
-                body: body.as_bytes().to_vec(),
-                result: Ok(()),
+                    eprintln!("Workspace restriction error: {message}");
+                    return login_error_response(&message);
+                }
+                // Obtain API key via token-exchange and persist
+                let api_key = obtain_api_key(&opts.issuer, &opts.client_id, &tokens.id_token)
+                    .await
+                    .ok();
+                if let Err(err) = persist_tokens_async(
+                    &opts.codex_home,
+                    api_key.clone(),
+                    tokens.id_token.clone(),
+                    tokens.access_token.clone(),
+                    tokens.refresh_token.clone(),
+                    opts.cli_auth_credentials_store_mode,
+                )
+                .await
+                {
+                    eprintln!("Persist error: {err}");
+                    return HandledRequest::Response(
+                        Response::from_string(format!("Unable to persist auth file: {err}"))
+                            .with_status_code(500),
+                    );
+                }
+
+                let redirect_target = compose_success_url(
+                    redirect_targets.success_url,
+                    &opts.issuer,
+                    &tokens.id_token,
+                    &tokens.access_token,
+                );
+                match tiny_http::Header::from_bytes(&b"Location"[..], redirect_target.as_bytes()) {
+                    Ok(header) => HandledRequest::RedirectWithHeader(header),
+                    Err(_) => HandledRequest::Response(
+                        Response::from_string("Internal Server Error").with_status_code(500),
+                    ),
+                }
+            }
+            Err(err) => {
+                eprintln!("Token exchange error: {err}");
+                HandledRequest::Response(
+                    Response::from_string(format!("Token exchange failed: {err}"))
+                        .with_status_code(500),
+                )
             }
         }
-        "/cancel" => HandledRequest::ResponseAndExit {
+    } else if path == redirect_targets.success_path {
+        let body = include_str!("assets/success.html");
+        HandledRequest::ResponseAndExit {
+            headers: match Header::from_bytes(
+                &b"Content-Type"[..],
+                &b"text/html; charset=utf-8"[..],
+            ) {
+                Ok(header) => vec![header],
+                Err(_) => Vec::new(),
+            },
+            body: body.as_bytes().to_vec(),
+            result: Ok(()),
+        }
+    } else if path == redirect_targets.cancel_path {
+        HandledRequest::ResponseAndExit {
             headers: Vec::new(),
             body: b"Login cancelled".to_vec(),
             result: Err(io::Error::new(
                 io::ErrorKind::Interrupted,
                 "Login cancelled",
             )),
-        },
-        _ => HandledRequest::Response(Response::from_string("Not Found").with_status_code(404)),
+        }
+    } else {
+        HandledRequest::Response(Response::from_string("Not Found").with_status_code(404))
     }
 }
 
@@ -569,7 +648,12 @@ pub(crate) async fn persist_tokens_async(
     .map_err(|e| io::Error::other(format!("persist task failed: {e}")))?
 }
 
-fn compose_success_url(port: u16, issuer: &str, id_token: &str, access_token: &str) -> String {
+fn compose_success_url(
+    success_url: &Url,
+    issuer: &str,
+    id_token: &str,
+    access_token: &str,
+) -> String {
     let token_claims = jwt_auth_claims(id_token);
     let access_claims = jwt_auth_claims(access_token);
 
@@ -614,7 +698,11 @@ fn compose_success_url(port: u16, issuer: &str, id_token: &str, access_token: &s
         .map(|(k, v)| format!("{}={}", k, urlencoding::encode(&v)))
         .collect::<Vec<_>>()
         .join("&");
-    format!("http://localhost:{port}/success?{qs}")
+    let mut url = success_url.clone();
+    url.set_query(None);
+    url.set_fragment(None);
+    url.set_query(Some(&qs));
+    url.to_string()
 }
 
 fn jwt_auth_claims(jwt: &str) -> serde_json::Map<String, serde_json::Value> {

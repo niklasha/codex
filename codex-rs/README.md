@@ -26,6 +26,10 @@ The Rust implementation is now the maintained Codex CLI and serves as the defaul
 
 Codex supports a rich set of configuration options. Note that the Rust CLI uses `config.toml` instead of `config.json`. See [`docs/config.md`](../docs/config.md) for details.
 
+#### Custom OAuth redirect targets
+
+By default the login flow spins up a local HTTP server and registers `http://localhost:<port>/auth/callback` as the OAuth redirect URI. If you need the authorization server to call back through a proxy or tunnel, set the `CODEX_LOGIN_REDIRECT_URI` environment variable before launching `codex`. Point it at the external base (for example `https://example.com/codex`) and the CLI will automatically append `/auth/callback`, `/success`, and `/cancel` when directing the browser.
+
 ### Model Context Protocol Support
 
 #### MCP client

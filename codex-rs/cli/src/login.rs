@@ -29,8 +29,8 @@ pub async fn login_with_chatgpt(
     let server = run_login_server(opts)?;
 
     eprintln!(
-        "Starting local login server on http://localhost:{}.\nIf your browser did not open, navigate to this URL to authenticate:\n\n{}",
-        server.actual_port, server.auth_url,
+        "Starting login server on http://localhost:{} (redirect URI: {}).\nIf your browser did not open, navigate to this URL to authenticate:\n\n{}",
+        server.actual_port, server.redirect_uri, server.auth_url,
     );
 
     server.block_until_done().await
