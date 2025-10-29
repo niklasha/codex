@@ -2,6 +2,8 @@ use std::io::Cursor;
 use std::io::Read;
 use std::io::Write;
 use std::io::{self};
+use std::net::IpAddr;
+use std::net::Ipv4Addr;
 use std::net::SocketAddr;
 use std::net::TcpStream;
 use std::path::Path;
@@ -32,6 +34,7 @@ use url::Url;
 const DEFAULT_ISSUER: &str = "https://auth.openai.com";
 const DEFAULT_PORT: u16 = 1455;
 const REDIRECT_URI_ENV_VAR: &str = "CODEX_LOGIN_REDIRECT_URI";
+const BIND_ADDRESS_ENV_VAR: &str = "CODEX_LOGIN_BIND_ADDRESS";
 
 #[derive(Debug, Clone)]
 pub struct ServerOptions {
@@ -44,6 +47,7 @@ pub struct ServerOptions {
     pub forced_chatgpt_workspace_id: Option<String>,
     pub cli_auth_credentials_store_mode: AuthCredentialsStoreMode,
     pub redirect_base_override: Option<Url>,
+    pub bind_address: IpAddr,
 }
 
 impl ServerOptions {
@@ -67,6 +71,17 @@ impl ServerOptions {
                 }
             }
         });
+        let bind_address = std::env::var(BIND_ADDRESS_ENV_VAR)
+            .ok()
+            .and_then(|raw| {
+                raw.parse::<IpAddr>()
+                    .map_err(|err| {
+                        eprintln!("Ignoring {BIND_ADDRESS_ENV_VAR} override '{raw}': {err}");
+                        err
+                    })
+                    .ok()
+            })
+            .unwrap_or_else(|| IpAddr::V4(Ipv4Addr::LOCALHOST));
         Self {
             codex_home,
             client_id,
@@ -77,6 +92,7 @@ impl ServerOptions {
             forced_chatgpt_workspace_id,
             cli_auth_credentials_store_mode,
             redirect_base_override,
+            bind_address,
         }
     }
 }
@@ -85,6 +101,7 @@ pub struct LoginServer {
     pub auth_url: String,
     pub actual_port: u16,
     pub redirect_uri: String,
+    pub bind_address: IpAddr,
     server_handle: tokio::task::JoinHandle<io::Result<()>>,
     shutdown_handle: ShutdownHandle,
 }
@@ -120,7 +137,7 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
     let pkce = generate_pkce();
     let state = opts.force_state.clone().unwrap_or_else(generate_state);
 
-    let server = bind_server(opts.port)?;
+    let server = bind_server(opts.bind_address, opts.port)?;
     let actual_port = match server.server_addr().to_ip() {
         Some(addr) => addr.port(),
         None => {
@@ -132,11 +149,12 @@ pub fn run_login_server(opts: ServerOptions) -> io::Result<LoginServer> {
     };
     let server = Arc::new(server);
 
+    let host_for_url = ip_to_url_host(&opts.bind_address);
     let base_url = if let Some(override_base) = &opts.redirect_base_override {
         sanitize_base_url(override_base.clone())
     } else {
         sanitize_base_url(
-            Url::parse(&format!("http://localhost:{actual_port}/")).map_err(|err| {
+            Url::parse(&format!("http://{host_for_url}:{actual_port}/")).map_err(|err| {
                 io::Error::other(format!("failed to build default redirect base: {err}"))
             })?,
         )
@@ -277,6 +295,20 @@ fn sanitize_base_url(mut url: Url) -> Url {
         url.set_path(&new_path);
     }
     url
+}
+
+fn ip_to_url_host(ip: &IpAddr) -> String {
+    match ip {
+        IpAddr::V4(addr) => addr.to_string(),
+        IpAddr::V6(addr) => format!("[{addr}]"),
+    }
+}
+
+fn host_header(addr: &SocketAddr) -> String {
+    match addr.ip() {
+        IpAddr::V4(ip) => format!("{ip}:{}", addr.port()),
+        IpAddr::V6(ip) => format!("[{ip}]:{}", addr.port()),
+    }
 }
 
 struct RedirectTargets<'a> {
@@ -502,16 +534,13 @@ fn generate_state() -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn send_cancel_request(port: u16) -> io::Result<()> {
-    let addr: SocketAddr = format!("127.0.0.1:{port}")
-        .parse()
-        .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+fn send_cancel_request(addr: SocketAddr) -> io::Result<()> {
     let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
 
     stream.write_all(b"GET /cancel HTTP/1.1\r\n")?;
-    stream.write_all(format!("Host: 127.0.0.1:{port}\r\n").as_bytes())?;
+    stream.write_all(format!("Host: {}\r\n", host_header(&addr)).as_bytes())?;
     stream.write_all(b"Connection: close\r\n\r\n")?;
 
     let mut buf = [0u8; 64];
@@ -519,15 +548,15 @@ fn send_cancel_request(port: u16) -> io::Result<()> {
     Ok(())
 }
 
-fn bind_server(port: u16) -> io::Result<Server> {
-    let bind_address = format!("127.0.0.1:{port}");
+fn bind_server(bind_address: IpAddr, port: u16) -> io::Result<Server> {
+    let bind_socket = SocketAddr::new(bind_address, port);
     let mut cancel_attempted = false;
     let mut attempts = 0;
     const MAX_ATTEMPTS: u32 = 10;
     const RETRY_DELAY: Duration = Duration::from_millis(200);
 
     loop {
-        match Server::http(&bind_address) {
+        match Server::http(bind_socket) {
             Ok(server) => return Ok(server),
             Err(err) => {
                 attempts += 1;
@@ -541,7 +570,7 @@ fn bind_server(port: u16) -> io::Result<Server> {
                 if is_addr_in_use {
                     if !cancel_attempted {
                         cancel_attempted = true;
-                        if let Err(cancel_err) = send_cancel_request(port) {
+                        if let Err(cancel_err) = send_cancel_request(bind_socket) {
                             eprintln!("Failed to cancel previous login server: {cancel_err}");
                         }
                     }
@@ -551,7 +580,7 @@ fn bind_server(port: u16) -> io::Result<Server> {
                     if attempts >= MAX_ATTEMPTS {
                         return Err(io::Error::new(
                             io::ErrorKind::AddrInUse,
-                            format!("Port {bind_address} is already in use"),
+                            format!("Address {bind_socket} is already in use"),
                         ));
                     }
 

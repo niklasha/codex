@@ -28,7 +28,7 @@ Codex supports a rich set of configuration options. Note that the Rust CLI uses 
 
 #### Custom OAuth redirect targets
 
-By default the login flow spins up a local HTTP server and registers `http://localhost:<port>/auth/callback` as the OAuth redirect URI. If you need the authorization server to call back through a proxy or tunnel, set the `CODEX_LOGIN_REDIRECT_URI` environment variable before launching `codex`. Point it at the external base (for example `https://example.com/codex`) and the CLI will automatically append `/auth/callback`, `/success`, and `/cancel` when directing the browser.
+By default the login flow spins up a local HTTP server and registers `http://localhost:<port>/auth/callback` as the OAuth redirect URI. If you need the authorization server to call back through a proxy or tunnel, set the `CODEX_LOGIN_REDIRECT_URI` environment variable before launching `codex`. Point it at the external base (for example `https://example.com/codex`) and the CLI will automatically append `/auth/callback`, `/success`, and `/cancel` when directing the browser. To listen on a non-loopback interface (for example when running behind a tunnel), set `CODEX_LOGIN_BIND_ADDRESS` to the desired IPv4 or IPv6 address before starting the CLI.
 
 ### Model Context Protocol Support
 

@@ -13,6 +13,7 @@ use codex_login::run_login_server;
 use codex_protocol::config_types::ForcedLoginMethod;
 use std::io::IsTerminal;
 use std::io::Read;
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 pub async fn login_with_chatgpt(
@@ -28,12 +29,20 @@ pub async fn login_with_chatgpt(
     );
     let server = run_login_server(opts)?;
 
+    let host = format_host_for_display(server.bind_address);
     eprintln!(
-        "Starting login server on http://localhost:{} (redirect URI: {}).\nIf your browser did not open, navigate to this URL to authenticate:\n\n{}",
-        server.actual_port, server.redirect_uri, server.auth_url,
+        "Starting login server on http://{}:{} (redirect URI: {}).\nIf your browser did not open, navigate to this URL to authenticate:\n\n{}",
+        host, server.actual_port, server.redirect_uri, server.auth_url,
     );
 
     server.block_until_done().await
+}
+
+fn format_host_for_display(ip: IpAddr) -> String {
+    match ip {
+        IpAddr::V4(addr) => addr.to_string(),
+        IpAddr::V6(addr) => format!("[{addr}]"),
+    }
 }
 
 pub async fn run_login_with_chatgpt(cli_config_overrides: CliConfigOverrides) -> ! {

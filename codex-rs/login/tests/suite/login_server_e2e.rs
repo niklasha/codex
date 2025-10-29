@@ -111,17 +111,16 @@ async fn end_to_end_login_flow_persists_auth_json() -> Result<()> {
     // Run server in background
     let server_home = codex_home.clone();
 
-    let opts = ServerOptions {
-        codex_home: server_home,
-        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-        client_id: codex_login::CLIENT_ID.to_string(),
-        issuer,
-        port: 0,
-        open_browser: false,
-        force_state: Some(state),
-        forced_chatgpt_workspace_id: Some(chatgpt_account_id.to_string()),
-        redirect_base_override: None,
-    };
+    let mut opts = ServerOptions::new(
+        server_home,
+        codex_login::CLIENT_ID.to_string(),
+        Some(chatgpt_account_id.to_string()),
+        AuthCredentialsStoreMode::File,
+    );
+    opts.issuer = issuer;
+    opts.port = 0;
+    opts.open_browser = false;
+    opts.force_state = Some(state);
     let server = run_login_server(opts)?;
     assert!(
         server
@@ -173,17 +172,16 @@ async fn creates_missing_codex_home_dir() -> Result<()> {
 
     // Run server in background
     let server_home = codex_home.clone();
-    let opts = ServerOptions {
-        codex_home: server_home,
-        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-        client_id: codex_login::CLIENT_ID.to_string(),
-        issuer,
-        port: 0,
-        open_browser: false,
-        force_state: Some(state),
-        forced_chatgpt_workspace_id: None,
-        redirect_base_override: None,
-    };
+    let mut opts = ServerOptions::new(
+        server_home,
+        codex_login::CLIENT_ID.to_string(),
+        None,
+        AuthCredentialsStoreMode::File,
+    );
+    opts.issuer = issuer;
+    opts.port = 0;
+    opts.open_browser = false;
+    opts.force_state = Some(state);
     let server = run_login_server(opts)?;
     let login_port = server.actual_port;
 
@@ -213,17 +211,16 @@ async fn forced_chatgpt_workspace_id_mismatch_blocks_login() -> Result<()> {
     let codex_home = tmp.path().to_path_buf();
     let state = "state-mismatch".to_string();
 
-    let opts = ServerOptions {
-        codex_home: codex_home.clone(),
-        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-        client_id: codex_login::CLIENT_ID.to_string(),
-        issuer,
-        port: 0,
-        open_browser: false,
-        force_state: Some(state.clone()),
-        forced_chatgpt_workspace_id: Some("org-required".to_string()),
-        redirect_base_override: None,
-    };
+    let mut opts = ServerOptions::new(
+        codex_home.clone(),
+        codex_login::CLIENT_ID.to_string(),
+        Some("org-required".to_string()),
+        AuthCredentialsStoreMode::File,
+    );
+    opts.issuer = issuer;
+    opts.port = 0;
+    opts.open_browser = false;
+    opts.force_state = Some(state.clone());
     let server = run_login_server(opts)?;
     assert!(
         server
@@ -271,19 +268,18 @@ async fn honors_redirect_base_override() -> Result<()> {
     let codex_home = tmp.path().to_path_buf();
     let state = "override-state".to_string();
 
-    let opts = ServerOptions {
-        codex_home: codex_home.clone(),
-        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-        client_id: codex_login::CLIENT_ID.to_string(),
-        issuer,
-        port: 0,
-        open_browser: false,
-        force_state: Some(state.clone()),
-        forced_chatgpt_workspace_id: None,
-        redirect_base_override: Some(
-            Url::parse("http://example.com/custom").expect("valid override"),
-        ),
-    };
+    let mut opts = ServerOptions::new(
+        codex_home.clone(),
+        codex_login::CLIENT_ID.to_string(),
+        None,
+        AuthCredentialsStoreMode::File,
+    );
+    opts.issuer = issuer;
+    opts.port = 0;
+    opts.open_browser = false;
+    opts.force_state = Some(state.clone());
+    opts.redirect_base_override =
+        Some(Url::parse("http://example.com/custom").expect("valid override"));
 
     let server = run_login_server(opts)?;
     assert_eq!(
@@ -334,17 +330,16 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
     let first_tmp = tempdir()?;
     let first_codex_home = first_tmp.path().to_path_buf();
 
-    let first_opts = ServerOptions {
-        codex_home: first_codex_home,
-        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-        client_id: codex_login::CLIENT_ID.to_string(),
-        issuer: issuer.clone(),
-        port: 0,
-        open_browser: false,
-        force_state: Some("cancel_state".to_string()),
-        forced_chatgpt_workspace_id: None,
-        redirect_base_override: None,
-    };
+    let mut first_opts = ServerOptions::new(
+        first_codex_home,
+        codex_login::CLIENT_ID.to_string(),
+        None,
+        AuthCredentialsStoreMode::File,
+    );
+    first_opts.issuer = issuer.clone();
+    first_opts.port = 0;
+    first_opts.open_browser = false;
+    first_opts.force_state = Some("cancel_state".to_string());
 
     let first_server = run_login_server(first_opts)?;
     let login_port = first_server.actual_port;
@@ -355,17 +350,16 @@ async fn cancels_previous_login_server_when_port_is_in_use() -> Result<()> {
     let second_tmp = tempdir()?;
     let second_codex_home = second_tmp.path().to_path_buf();
 
-    let second_opts = ServerOptions {
-        codex_home: second_codex_home,
-        cli_auth_credentials_store_mode: AuthCredentialsStoreMode::File,
-        client_id: codex_login::CLIENT_ID.to_string(),
-        issuer,
-        port: login_port,
-        open_browser: false,
-        force_state: Some("cancel_state_2".to_string()),
-        forced_chatgpt_workspace_id: None,
-        redirect_base_override: None,
-    };
+    let mut second_opts = ServerOptions::new(
+        second_codex_home,
+        codex_login::CLIENT_ID.to_string(),
+        None,
+        AuthCredentialsStoreMode::File,
+    );
+    second_opts.issuer = issuer;
+    second_opts.port = login_port;
+    second_opts.open_browser = false;
+    second_opts.force_state = Some("cancel_state_2".to_string());
 
     let second_server = run_login_server(second_opts)?;
     assert_eq!(second_server.actual_port, login_port);
