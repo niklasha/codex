@@ -48,7 +48,9 @@ async fn main() -> Result<()> {
 
     if let Some(user_text) = cli.user_message.as_deref() {
         let conversation_id = start_conversation(&mut socket).await?;
+        add_listener(&mut socket, &conversation_id).await?;
         send_user_message(&mut socket, &conversation_id, user_text).await?;
+        wait_for_task_complete(&mut socket, &conversation_id).await?;
     }
 
     Ok(())
@@ -90,7 +92,7 @@ async fn start_conversation(socket: &mut WsStream) -> Result<String> {
 
 async fn send_user_message(socket: &mut WsStream, conversation_id: &str, text: &str) -> Result<()> {
     let frame = json!({
-        "id": 2,
+        "id": 3,
         "method": "sendUserMessage",
         "params": {
             "conversationId": conversation_id,
@@ -100,7 +102,7 @@ async fn send_user_message(socket: &mut WsStream, conversation_id: &str, text: &
         }
     });
     socket.send(Message::Text(frame.to_string())).await?;
-    let _ = wait_for_response(socket, 2).await?;
+    let _ = wait_for_response(socket, 3).await?;
     Ok(())
 }
 
@@ -136,4 +138,56 @@ async fn wait_for_response(socket: &mut WsStream, target_id: i64) -> Result<Valu
     }
 
     anyhow::bail!("socket closed before receiving response {target_id}");
+}
+
+async fn add_listener(socket: &mut WsStream, conversation_id: &str) -> Result<()> {
+    let frame = json!({
+        "id": 2,
+        "method": "addConversationListener",
+        "params": {
+            "conversationId": conversation_id,
+            "experimentalRawEvents": true
+        }
+    });
+    socket.send(Message::Text(frame.to_string())).await?;
+    let _ = wait_for_response(socket, 2).await?;
+    Ok(())
+}
+
+async fn wait_for_task_complete(socket: &mut WsStream, conversation_id: &str) -> Result<()> {
+    loop {
+        match socket.next().await {
+            Some(Ok(Message::Text(text))) => {
+                println!("<- {}", text);
+                if let Ok(value) = serde_json::from_str::<Value>(&text) {
+                    let method_matches = value
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .map(|m| m == "codex/event/task_complete")
+                        .unwrap_or(false);
+                    let conversation_matches = value
+                        .get("params")
+                        .and_then(|params| params.get("conversationId"))
+                        .and_then(Value::as_str)
+                        == Some(conversation_id);
+                    if method_matches && conversation_matches {
+                        return Ok(());
+                    }
+                }
+            }
+            Some(Ok(Message::Ping(payload))) => {
+                socket.send(Message::Pong(payload)).await?;
+            }
+            Some(Ok(Message::Pong(_))) | Some(Ok(Message::Binary(_))) => {
+                // Ignore ancillary frames.
+            }
+            Some(Ok(Message::Close(frame))) => {
+                println!("<- close {frame:?}");
+                anyhow::bail!("connection closed before task completion");
+            }
+            Some(Err(err)) => return Err(err.into()),
+            None => anyhow::bail!("socket closed before task completion"),
+            Some(Ok(Message::Frame(_))) => {}
+        }
+    }
 }

@@ -344,9 +344,8 @@ fn map_ws_error(err: WsError) -> Error {
 }
 
 fn upgrade_error(status: StatusCode, message: &str) -> UpgradeError {
-    let mut response = http::Response::new(Some(
-        serde_json::json!({ "error": message }).to_string(),
-    ));
+    let mut response =
+        http::Response::new(Some(serde_json::json!({ "error": message }).to_string()));
     *response.status_mut() = status;
     response.headers_mut().insert(
         http::header::CONTENT_TYPE,
