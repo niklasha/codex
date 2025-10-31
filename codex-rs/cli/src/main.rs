@@ -388,7 +388,12 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
             mcp_cli.run().await?;
         }
         Some(Subcommand::AppServer) => {
-            codex_app_server::run_main(codex_linux_sandbox_exe, root_config_overrides).await?;
+            codex_app_server::run_main(
+                codex_linux_sandbox_exe,
+                root_config_overrides,
+                codex_app_server::ServerOptions::default(),
+            )
+            .await?;
         }
         Some(Subcommand::Resume(ResumeCommand {
             session_id,
