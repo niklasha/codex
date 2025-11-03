@@ -20,11 +20,14 @@ use tracing_subscriber::util::SubscriberInitExt;
 mod codex_message_processor;
 mod error_code;
 mod fuzzy_file_search;
+mod kafka;
 mod message_processor;
 mod models;
 mod outgoing_message;
 mod transport;
 
+pub use self::kafka::KAFKA_TRANSPORT_NAME;
+pub use self::kafka::KafkaOptions;
 pub use self::transport::STDIO_TRANSPORT_NAME;
 pub use self::transport::Transport;
 pub use self::transport::TransportHandle;
@@ -111,6 +114,10 @@ impl ServerOptions {
     pub fn disable_stdio(&mut self) {
         self.transports
             .retain(|transport| transport.name() != transport::STDIO_TRANSPORT_NAME);
+    }
+
+    pub fn add_kafka(&mut self, options: KafkaOptions) {
+        self.transports.push(self::kafka::transport_handle(options));
     }
 }
 
