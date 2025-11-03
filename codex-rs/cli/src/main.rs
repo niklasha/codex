@@ -7,6 +7,7 @@ use codex_app_server::STDIO_TRANSPORT_NAME;
 use codex_app_server::ServerOptions as AppServerOptions;
 use codex_app_server::TransportRegistry;
 use codex_app_server::TransportSpec;
+use codex_app_server::register_kafka_transport;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
@@ -548,8 +549,9 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
         }
         Some(Subcommand::AppServer(app_server_cli)) => match app_server_cli.subcommand {
             None => {
-                let server_options =
-                    build_app_server_options(TransportRegistry::with_builtin(), &app_server_cli)?;
+                let mut registry = TransportRegistry::with_builtin();
+                register_kafka_transport(&mut registry);
+                let server_options = build_app_server_options(registry, &app_server_cli)?;
                 codex_app_server::run_main(
                     codex_linux_sandbox_exe,
                     root_config_overrides,
