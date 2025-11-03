@@ -25,12 +25,16 @@ mod message_processor;
 mod models;
 mod outgoing_message;
 mod transport;
+mod websocket;
 
 pub use self::transport::STDIO_TRANSPORT_NAME;
 pub use self::transport::Transport;
 pub use self::transport::TransportHandle;
 pub use self::transport::into_handle as into_transport_handle;
 pub use self::transport::stdio_transport;
+pub use self::websocket::DEFAULT_WEBSOCKET_PATH;
+pub use self::websocket::WEBSOCKET_SUBPROTOCOL;
+pub use self::websocket::WebsocketOptions;
 
 /// Size of the bounded channels used to communicate between tasks. The value
 /// is a balance between throughput and memory usage – 128 messages should be
@@ -112,6 +116,11 @@ impl ServerOptions {
     pub fn disable_stdio(&mut self) {
         self.transports
             .retain(|transport| transport.name() != transport::STDIO_TRANSPORT_NAME);
+    }
+
+    pub fn add_websocket(&mut self, options: WebsocketOptions) {
+        self.transports
+            .push(transport::websocket_transport(options));
     }
 }
 
