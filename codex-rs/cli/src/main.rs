@@ -3,6 +3,10 @@ use clap::CommandFactory;
 use clap::Parser;
 use clap_complete::Shell;
 use clap_complete::generate;
+use codex_app_server::STDIO_TRANSPORT_NAME;
+use codex_app_server::ServerOptions as AppServerOptions;
+use codex_app_server::TransportRegistry;
+use codex_app_server::TransportSpec;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_chatgpt::apply_command::ApplyCommand;
 use codex_chatgpt::apply_command::run_apply_command;
@@ -24,7 +28,9 @@ use codex_tui::AppExitInfo;
 use codex_tui::Cli as TuiCli;
 use codex_tui::update_action::UpdateAction;
 use owo_colors::OwoColorize;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::str::FromStr;
 use supports_color::Stream;
 
 mod mcp_cmd;
@@ -232,6 +238,18 @@ struct AppServerCommand {
     /// Omit to run the app server; specify a subcommand for tooling.
     #[command(subcommand)]
     subcommand: Option<AppServerSubcommand>,
+
+    /// Enable one or more transports (repeatable). Defaults to `stdio`.
+    #[arg(long = "transport", value_name = "NAME")]
+    transports: Vec<String>,
+
+    /// Transport option in the form `name.key=value` (repeatable).
+    #[arg(long = "transport-opt", value_name = "NAME.KEY=VALUE")]
+    transport_opts: Vec<TransportOpt>,
+
+    /// Disable the stdio transport even if specified explicitly.
+    #[arg(long = "no-stdio", default_value_t = false)]
+    no_stdio: bool,
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -261,11 +279,82 @@ struct GenerateJsonSchemaCommand {
     out_dir: PathBuf,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransportOpt {
+    transport: String,
+    key: String,
+    value: String,
+}
+
+impl FromStr for TransportOpt {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (name_and_key, value) = s
+            .split_once('=')
+            .ok_or_else(|| "expected NAME.KEY=VALUE".to_string())?;
+        let (transport, key) = name_and_key
+            .split_once('.')
+            .ok_or_else(|| "expected NAME.KEY=VALUE".to_string())?;
+        if transport.is_empty() || key.is_empty() {
+            return Err("transport name and key must be non-empty".to_string());
+        }
+        Ok(Self {
+            transport: transport.to_string(),
+            key: key.to_string(),
+            value: value.to_string(),
+        })
+    }
+}
+
 #[derive(Debug, Parser)]
 struct StdioToUdsCommand {
     /// Path to the Unix domain socket to connect to.
     #[arg(value_name = "SOCKET_PATH")]
     socket_path: PathBuf,
+}
+
+fn build_app_server_options(
+    registry: TransportRegistry,
+    cli: &AppServerCommand,
+) -> anyhow::Result<AppServerOptions> {
+    let mut options_by_transport: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for opt in &cli.transport_opts {
+        options_by_transport
+            .entry(opt.transport.clone())
+            .or_default()
+            .insert(opt.key.clone(), opt.value.clone());
+    }
+
+    let mut transport_names = cli.transports.clone();
+    if transport_names.is_empty() && !cli.no_stdio {
+        transport_names.push(STDIO_TRANSPORT_NAME.to_string());
+    }
+
+    if cli.no_stdio {
+        transport_names.retain(|name| name != STDIO_TRANSPORT_NAME);
+    }
+
+    for name in options_by_transport.keys() {
+        if !transport_names.contains(name) {
+            anyhow::bail!("transport option provided for `{name}` but transport is not enabled");
+        }
+    }
+
+    let mut specs = Vec::with_capacity(transport_names.len());
+    for name in transport_names {
+        let options = options_by_transport.remove(&name).unwrap_or_default();
+        specs.push(TransportSpec::new(name, options));
+    }
+
+    let mut options = AppServerOptions::with_transports(registry.build_all(&specs)?);
+    if cli.no_stdio {
+        options.disable_stdio();
+    } else {
+        options.ensure_stdio();
+    }
+
+    Ok(options)
 }
 
 fn format_exit_messages(exit_info: AppExitInfo, color_enabled: bool) -> Vec<String> {
@@ -459,7 +548,14 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
         }
         Some(Subcommand::AppServer(app_server_cli)) => match app_server_cli.subcommand {
             None => {
-                codex_app_server::run_main(codex_linux_sandbox_exe, root_config_overrides).await?;
+                let server_options =
+                    build_app_server_options(TransportRegistry::with_builtin(), &app_server_cli)?;
+                codex_app_server::run_main(
+                    codex_linux_sandbox_exe,
+                    root_config_overrides,
+                    server_options,
+                )
+                .await?;
             }
             Some(AppServerSubcommand::GenerateTs(gen_cli)) => {
                 codex_app_server_protocol::generate_ts(
