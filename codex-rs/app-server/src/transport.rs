@@ -19,8 +19,11 @@ use crate::SharedState;
 use crate::message_processor::MessageProcessor;
 use crate::outgoing_message::OutgoingMessage;
 use crate::outgoing_message::OutgoingMessageSender;
+use crate::websocket::WebsocketOptions;
+use crate::websocket::{self};
 
 pub const STDIO_TRANSPORT_NAME: &str = "stdio";
+pub const WEBSOCKET_TRANSPORT_NAME: &str = "websocket";
 
 pub type TransportHandle = Arc<dyn Transport>;
 
@@ -41,6 +44,10 @@ where
 
 pub fn stdio_transport() -> TransportHandle {
     into_handle(StdioTransport)
+}
+
+pub fn websocket_transport(options: WebsocketOptions) -> TransportHandle {
+    into_handle(WebsocketTransport { options })
 }
 
 pub(crate) async fn run_all(
@@ -79,6 +86,21 @@ impl Transport for StdioTransport {
 
     fn run(&self, shared_state: SharedState) -> TransportFuture {
         Box::pin(run_stdio(shared_state))
+    }
+}
+
+struct WebsocketTransport {
+    options: WebsocketOptions,
+}
+
+impl Transport for WebsocketTransport {
+    fn name(&self) -> &'static str {
+        WEBSOCKET_TRANSPORT_NAME
+    }
+
+    fn run(&self, shared_state: SharedState) -> TransportFuture {
+        let options = self.options.clone();
+        Box::pin(websocket::serve(shared_state, options))
     }
 }
 
