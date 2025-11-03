@@ -4901,7 +4901,7 @@ dependencies = [
 [[package]]
 name = "rdkafka"
 version = "0.38.0"
-source = "git+https://github.com/niklasha/rust-rdkafka?branch=niklasha%2Fopenbsd%2Fbuildability#72018444249c3ad539c4bae8bfa0e3a6730f4c68"
+source = "git+https://github.com/niklasha/rust-rdkafka?branch=niklasha%2Fopenbsd%2Fbuildability#64c5414813acb82fa1ff307d388bbb57d64be99d"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -4918,7 +4918,7 @@ dependencies = [
 [[package]]
 name = "rdkafka-sys"
 version = "4.9.0+2.10.0"
-source = "git+https://github.com/niklasha/rust-rdkafka?branch=niklasha%2Fopenbsd%2Fbuildability#72018444249c3ad539c4bae8bfa0e3a6730f4c68"
+source = "git+https://github.com/niklasha/rust-rdkafka?branch=niklasha%2Fopenbsd%2Fbuildability#64c5414813acb82fa1ff307d388bbb57d64be99d"
 dependencies = [
  "cmake",
  "libc",
