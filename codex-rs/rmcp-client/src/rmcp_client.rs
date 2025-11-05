@@ -335,12 +335,12 @@ impl RmcpClient {
                 match time::timeout(duration, transport_future).await {
                     Ok(result) => result,
                     Err(_) => {
-                        if let Some(setup) = setup_for_retry {
-                            if let Ok(new_transport) = setup.create_streamable_transport().await {
-                                let mut guard = self.state.lock().await;
-                                if let ClientState::Connecting { transport, .. } = &mut *guard {
-                                    *transport = Some(new_transport);
-                                }
+                        if let Some(setup) = setup_for_retry
+                            && let Ok(new_transport) = setup.create_streamable_transport().await
+                        {
+                            let mut guard = self.state.lock().await;
+                            if let ClientState::Connecting { transport, .. } = &mut *guard {
+                                *transport = Some(new_transport);
                             }
                         }
                         return Err(anyhow!(
@@ -379,30 +379,27 @@ impl RmcpClient {
                     if !attempted_legacy
                         && streamable_setup.is_some()
                         && should_attempt_legacy(&err)
+                        && let Some(setup) = streamable_setup.clone()
                     {
-                        if let Some(setup) = streamable_setup.clone() {
-                            match setup.create_legacy_transport().await {
-                                Ok(new_transport) => {
-                                    {
-                                        let mut guard = self.state.lock().await;
-                                        if let ClientState::Connecting { transport, .. } =
-                                            &mut *guard
-                                        {
-                                            *transport = Some(new_transport);
-                                        }
+                        match setup.create_legacy_transport().await {
+                            Ok(new_transport) => {
+                                {
+                                    let mut guard = self.state.lock().await;
+                                    if let ClientState::Connecting { transport, .. } = &mut *guard {
+                                        *transport = Some(new_transport);
                                     }
-                                    attempted_legacy = true;
-                                    tracing::debug!(
-                                        "Retrying MCP handshake using legacy SSE fallback transport"
-                                    );
-                                    continue;
                                 }
-                                Err(build_err) => {
-                                    tracing::warn!(
-                                        "failed to build legacy SSE transport for MCP server `{}`: {build_err:?}",
-                                        setup.server_name
-                                    );
-                                }
+                                attempted_legacy = true;
+                                tracing::debug!(
+                                    "Retrying MCP handshake using legacy SSE fallback transport"
+                                );
+                                continue;
+                            }
+                            Err(build_err) => {
+                                tracing::warn!(
+                                    "failed to build legacy SSE transport for MCP server `{}`: {build_err:?}",
+                                    setup.server_name
+                                );
                             }
                         }
                     }
