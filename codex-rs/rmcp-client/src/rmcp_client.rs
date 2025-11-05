@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::Result;
 use anyhow::anyhow;
 use futures::FutureExt;
+use futures::future::BoxFuture;
 use mcp_types::CallToolRequestParams;
 use mcp_types::CallToolResult;
 use mcp_types::InitializeRequestParams;
@@ -21,18 +22,23 @@ use mcp_types::ListToolsRequestParams;
 use mcp_types::ListToolsResult;
 use mcp_types::ReadResourceRequestParams;
 use mcp_types::ReadResourceResult;
+use reqwest::header::AUTHORIZATION;
 use reqwest::header::HeaderMap;
+use reqwest::header::HeaderValue;
 use rmcp::model::CallToolRequestParam;
 use rmcp::model::InitializeRequestParam;
 use rmcp::model::PaginatedRequestParam;
 use rmcp::model::ReadResourceRequestParam;
+use rmcp::service::ClientInitializeError;
 use rmcp::service::RoleClient;
 use rmcp::service::RunningService;
 use rmcp::service::{self};
+use rmcp::transport::SseClientTransport;
 use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::auth::AuthClient;
 use rmcp::transport::auth::OAuthState;
 use rmcp::transport::child_process::TokioChildProcess;
+use rmcp::transport::sse_client::SseClientConfig;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::BufReader;
@@ -64,11 +70,131 @@ enum PendingTransport {
         transport: StreamableHttpClientTransport<AuthClient<reqwest::Client>>,
         oauth_persistor: OAuthPersistor,
     },
+    LegacySse {
+        transport: SseClientTransport<reqwest::Client>,
+    },
+    LegacySseWithOAuth {
+        transport: SseClientTransport<AuthClient<reqwest::Client>>,
+        oauth_persistor: OAuthPersistor,
+    },
+}
+
+impl PendingTransport {
+    fn into_service_future(
+        self,
+        handler: LoggingClientHandler,
+    ) -> (
+        BoxFuture<
+            'static,
+            Result<RunningService<RoleClient, LoggingClientHandler>, ClientInitializeError>,
+        >,
+        Option<OAuthPersistor>,
+    ) {
+        match self {
+            PendingTransport::ChildProcess(transport) => {
+                (service::serve_client(handler, transport).boxed(), None)
+            }
+            PendingTransport::StreamableHttp { transport } => {
+                (service::serve_client(handler, transport).boxed(), None)
+            }
+            PendingTransport::StreamableHttpWithOAuth {
+                transport,
+                oauth_persistor,
+            } => (
+                service::serve_client(handler, transport).boxed(),
+                Some(oauth_persistor),
+            ),
+            PendingTransport::LegacySse { transport } => {
+                (service::serve_client(handler, transport).boxed(), None)
+            }
+            PendingTransport::LegacySseWithOAuth {
+                transport,
+                oauth_persistor,
+            } => (
+                service::serve_client(handler, transport).boxed(),
+                Some(oauth_persistor),
+            ),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct StreamableHttpSetup {
+    server_name: String,
+    url: String,
+    bearer_token: Option<String>,
+    default_headers: HeaderMap,
+    store_mode: OAuthCredentialsStoreMode,
+    initial_oauth_tokens: Option<StoredOAuthTokens>,
+}
+
+impl StreamableHttpSetup {
+    async fn create_streamable_transport(&self) -> Result<PendingTransport> {
+        if let Some(tokens) = &self.initial_oauth_tokens {
+            let (transport, oauth_persistor) = create_oauth_transport_and_runtime(
+                &self.server_name,
+                &self.url,
+                tokens.clone(),
+                self.store_mode,
+                self.default_headers.clone(),
+            )
+            .await?;
+            Ok(PendingTransport::StreamableHttpWithOAuth {
+                transport,
+                oauth_persistor,
+            })
+        } else {
+            let mut http_config = StreamableHttpClientTransportConfig::with_uri(self.url.clone());
+            if let Some(token) = &self.bearer_token {
+                http_config = http_config.auth_header(token.clone());
+            }
+            let http_client =
+                apply_default_headers(reqwest::Client::builder(), &self.default_headers).build()?;
+            let transport = StreamableHttpClientTransport::with_client(http_client, http_config);
+            Ok(PendingTransport::StreamableHttp { transport })
+        }
+    }
+
+    async fn create_legacy_transport(&self) -> Result<PendingTransport> {
+        if let Some(tokens) = &self.initial_oauth_tokens {
+            let (transport, oauth_persistor) = create_oauth_sse_transport_and_runtime(
+                &self.server_name,
+                &self.url,
+                tokens.clone(),
+                self.store_mode,
+                self.default_headers.clone(),
+            )
+            .await?;
+            Ok(PendingTransport::LegacySseWithOAuth {
+                transport,
+                oauth_persistor,
+            })
+        } else {
+            let mut headers = self.default_headers.clone();
+            if let Some(token) = &self.bearer_token {
+                let header_value = HeaderValue::from_str(&format!("Bearer {token}"))?;
+                headers.insert(AUTHORIZATION, header_value);
+            }
+            let http_client =
+                apply_default_headers(reqwest::Client::builder(), &headers).build()?;
+            let transport = SseClientTransport::start_with_client(
+                http_client,
+                SseClientConfig {
+                    sse_endpoint: Arc::<str>::from(self.url.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|err| anyhow!("failed to start legacy SSE transport: {err}"))?;
+            Ok(PendingTransport::LegacySse { transport })
+        }
+    }
 }
 
 enum ClientState {
     Connecting {
         transport: Option<PendingTransport>,
+        streamable_setup: Option<StreamableHttpSetup>,
     },
     Ready {
         service: Arc<RunningService<RoleClient, LoggingClientHandler>>,
@@ -128,6 +254,7 @@ impl RmcpClient {
         Ok(Self {
             state: Mutex::new(ClientState::Connecting {
                 transport: Some(PendingTransport::ChildProcess(transport)),
+                streamable_setup: None,
             }),
         })
     }
@@ -154,34 +281,19 @@ impl RmcpClient {
             },
         };
 
-        let transport = if let Some(initial_tokens) = initial_oauth_tokens.clone() {
-            let (transport, oauth_persistor) = create_oauth_transport_and_runtime(
-                server_name,
-                url,
-                initial_tokens,
-                store_mode,
-                default_headers.clone(),
-            )
-            .await?;
-            PendingTransport::StreamableHttpWithOAuth {
-                transport,
-                oauth_persistor,
-            }
-        } else {
-            let mut http_config = StreamableHttpClientTransportConfig::with_uri(url.to_string());
-            if let Some(bearer_token) = bearer_token.clone() {
-                http_config = http_config.auth_header(bearer_token);
-            }
-
-            let http_client =
-                apply_default_headers(reqwest::Client::builder(), &default_headers).build()?;
-
-            let transport = StreamableHttpClientTransport::with_client(http_client, http_config);
-            PendingTransport::StreamableHttp { transport }
+        let setup = StreamableHttpSetup {
+            server_name: server_name.to_string(),
+            url: url.to_string(),
+            bearer_token: bearer_token.clone(),
+            default_headers: default_headers.clone(),
+            store_mode,
+            initial_oauth_tokens: initial_oauth_tokens.clone(),
         };
+        let transport = setup.create_streamable_transport().await?;
         Ok(Self {
             state: Mutex::new(ClientState::Connecting {
                 transport: Some(transport),
+                streamable_setup: Some(setup),
             }),
         })
     }
@@ -196,62 +308,126 @@ impl RmcpClient {
         let rmcp_params: InitializeRequestParam = convert_to_rmcp(params.clone())?;
         let client_handler = LoggingClientHandler::new(rmcp_params);
 
-        let (transport, oauth_persistor) = {
-            let mut guard = self.state.lock().await;
-            match &mut *guard {
-                ClientState::Connecting { transport } => match transport.take() {
-                    Some(PendingTransport::ChildProcess(transport)) => (
-                        service::serve_client(client_handler.clone(), transport).boxed(),
-                        None,
-                    ),
-                    Some(PendingTransport::StreamableHttp { transport }) => (
-                        service::serve_client(client_handler.clone(), transport).boxed(),
-                        None,
-                    ),
-                    Some(PendingTransport::StreamableHttpWithOAuth {
+        let mut attempted_legacy = false;
+
+        loop {
+            let (transport_future, oauth_persistor, streamable_setup) = {
+                let mut guard = self.state.lock().await;
+                match &mut *guard {
+                    ClientState::Connecting {
                         transport,
-                        oauth_persistor,
-                    }) => (
-                        service::serve_client(client_handler.clone(), transport).boxed(),
-                        Some(oauth_persistor),
-                    ),
-                    None => return Err(anyhow!("client already initializing")),
-                },
-                ClientState::Ready { .. } => return Err(anyhow!("client already initialized")),
-            }
-        };
-
-        let service = match timeout {
-            Some(duration) => time::timeout(duration, transport)
-                .await
-                .map_err(|_| anyhow!("timed out handshaking with MCP server after {duration:?}"))?
-                .map_err(|err| anyhow!("handshaking with MCP server failed: {err}"))?,
-            None => transport
-                .await
-                .map_err(|err| anyhow!("handshaking with MCP server failed: {err}"))?,
-        };
-
-        let initialize_result_rmcp = service
-            .peer()
-            .peer_info()
-            .ok_or_else(|| anyhow!("handshake succeeded but server info was missing"))?;
-        let initialize_result = convert_to_mcp(initialize_result_rmcp)?;
-
-        {
-            let mut guard = self.state.lock().await;
-            *guard = ClientState::Ready {
-                service: Arc::new(service),
-                oauth: oauth_persistor.clone(),
+                        streamable_setup,
+                    } => {
+                        let setup = streamable_setup.clone();
+                        let pending = transport
+                            .take()
+                            .ok_or_else(|| anyhow!("client already initializing"))?;
+                        let (future, oauth) = pending.into_service_future(client_handler.clone());
+                        (future, oauth, setup)
+                    }
+                    ClientState::Ready { .. } => return Err(anyhow!("client already initialized")),
+                }
             };
-        }
 
-        if let Some(runtime) = oauth_persistor
-            && let Err(error) = runtime.persist_if_needed().await
-        {
-            warn!("failed to persist OAuth tokens after initialize: {error}");
-        }
+            let setup_for_retry = streamable_setup.clone();
 
-        Ok(initialize_result)
+            let service_result = if let Some(duration) = timeout {
+                match time::timeout(duration, transport_future).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        if let Some(setup) = setup_for_retry {
+                            if let Ok(new_transport) = setup.create_streamable_transport().await {
+                                let mut guard = self.state.lock().await;
+                                if let ClientState::Connecting { transport, .. } = &mut *guard {
+                                    *transport = Some(new_transport);
+                                }
+                            }
+                        }
+                        return Err(anyhow!(
+                            "timed out handshaking with MCP server after {duration:?}"
+                        ));
+                    }
+                }
+            } else {
+                transport_future.await
+            };
+
+            match service_result {
+                Ok(service) => {
+                    let initialize_result_rmcp = service.peer().peer_info().ok_or_else(|| {
+                        anyhow!("handshake succeeded but server info was missing")
+                    })?;
+                    let initialize_result = convert_to_mcp(initialize_result_rmcp)?;
+
+                    {
+                        let mut guard = self.state.lock().await;
+                        *guard = ClientState::Ready {
+                            service: Arc::new(service),
+                            oauth: oauth_persistor.clone(),
+                        };
+                    }
+
+                    if let Some(runtime) = oauth_persistor
+                        && let Err(error) = runtime.persist_if_needed().await
+                    {
+                        warn!("failed to persist OAuth tokens after initialize: {error}");
+                    }
+
+                    return Ok(initialize_result);
+                }
+                Err(err) => {
+                    if !attempted_legacy
+                        && streamable_setup.is_some()
+                        && should_attempt_legacy(&err)
+                    {
+                        if let Some(setup) = streamable_setup.clone() {
+                            match setup.create_legacy_transport().await {
+                                Ok(new_transport) => {
+                                    {
+                                        let mut guard = self.state.lock().await;
+                                        if let ClientState::Connecting { transport, .. } =
+                                            &mut *guard
+                                        {
+                                            *transport = Some(new_transport);
+                                        }
+                                    }
+                                    attempted_legacy = true;
+                                    tracing::debug!(
+                                        "Retrying MCP handshake using legacy SSE fallback transport"
+                                    );
+                                    continue;
+                                }
+                                Err(build_err) => {
+                                    tracing::warn!(
+                                        "failed to build legacy SSE transport for MCP server `{}`: {build_err:?}",
+                                        setup.server_name
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(setup) = streamable_setup {
+                        match setup.create_streamable_transport().await {
+                            Ok(new_transport) => {
+                                let mut guard = self.state.lock().await;
+                                if let ClientState::Connecting { transport, .. } = &mut *guard {
+                                    *transport = Some(new_transport);
+                                }
+                            }
+                            Err(build_err) => {
+                                tracing::warn!(
+                                    "failed to rebuild streamable transport for MCP server `{}` after handshake error: {build_err:?}",
+                                    setup.server_name
+                                );
+                            }
+                        }
+                    }
+
+                    return Err(anyhow!("handshaking with MCP server failed: {err}"));
+                }
+            }
+        }
     }
 
     pub async fn list_tools(
@@ -411,4 +587,98 @@ async fn create_oauth_transport_and_runtime(
     );
 
     Ok((transport, runtime))
+}
+
+async fn create_oauth_sse_transport_and_runtime(
+    server_name: &str,
+    url: &str,
+    initial_tokens: StoredOAuthTokens,
+    credentials_store: OAuthCredentialsStoreMode,
+    default_headers: HeaderMap,
+) -> Result<(
+    SseClientTransport<AuthClient<reqwest::Client>>,
+    OAuthPersistor,
+)> {
+    let http_client =
+        apply_default_headers(reqwest::Client::builder(), &default_headers).build()?;
+    let mut oauth_state = OAuthState::new(url.to_string(), Some(http_client.clone())).await?;
+
+    oauth_state
+        .set_credentials(
+            &initial_tokens.client_id,
+            initial_tokens.token_response.0.clone(),
+        )
+        .await?;
+
+    let manager = match oauth_state {
+        OAuthState::Authorized(manager) => manager,
+        OAuthState::Unauthorized(manager) => manager,
+        OAuthState::Session(_) | OAuthState::AuthorizedHttpClient(_) => {
+            return Err(anyhow!("unexpected OAuth state during client setup"));
+        }
+    };
+
+    let auth_client = AuthClient::new(http_client, manager);
+    let auth_manager = auth_client.auth_manager.clone();
+
+    let transport = SseClientTransport::start_with_client(
+        auth_client,
+        SseClientConfig {
+            sse_endpoint: Arc::<str>::from(url.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|err| anyhow!("failed to start legacy SSE transport with OAuth: {err}"))?;
+
+    let runtime = OAuthPersistor::new(
+        server_name.to_string(),
+        url.to_string(),
+        auth_manager,
+        credentials_store,
+        Some(initial_tokens),
+    );
+
+    Ok((transport, runtime))
+}
+
+fn should_attempt_legacy(error: &ClientInitializeError) -> bool {
+    matches!(
+        error,
+        ClientInitializeError::TransportError { error, .. }
+            if error.is::<StreamableHttpClientTransport<reqwest::Client>, RoleClient>()
+                || error.is::<StreamableHttpClientTransport<AuthClient<reqwest::Client>>, RoleClient>()
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::transport::streamable_http_client::StreamableHttpError;
+
+    #[test]
+    fn should_attempt_legacy_for_streamable_client_error() {
+        let err = ClientInitializeError::transport::<StreamableHttpClientTransport<reqwest::Client>>(
+            StreamableHttpError::<reqwest::Error>::ServerDoesNotSupportSse,
+            "context",
+        );
+        assert!(should_attempt_legacy(&err));
+    }
+
+    #[test]
+    fn should_attempt_legacy_for_streamable_client_oauth_error() {
+        let err = ClientInitializeError::transport::<
+            StreamableHttpClientTransport<AuthClient<reqwest::Client>>,
+        >(
+            StreamableHttpError::<reqwest::Error>::ServerDoesNotSupportSse,
+            "context",
+        );
+        assert!(should_attempt_legacy(&err));
+    }
+
+    #[test]
+    fn should_not_attempt_legacy_for_other_errors() {
+        let err = ClientInitializeError::ConnectionClosed("boom".into());
+        assert!(!should_attempt_legacy(&err));
+    }
 }
