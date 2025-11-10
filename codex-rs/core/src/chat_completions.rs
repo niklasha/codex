@@ -455,7 +455,13 @@ pub(crate) async fn complete_chat_completions(
 
         match res {
             Ok(resp) if resp.status().is_success() => {
-                let body = resp.json::<JsonValue>().await?;
+                let body = resp
+                    .json::<JsonValue>()
+                    .await
+                    .map_err(|err| CodexErr::ResponseStreamFailed(ResponseStreamFailed {
+                        source: err,
+                        request_id: None,
+                    }))?;
                 return build_completion_stream(body, show_raw_agent_reasoning);
             }
             Ok(res) => {
@@ -508,7 +514,7 @@ fn build_completion_stream(
     let choice = body
         .get("choices")
         .and_then(|c| c.as_array())
-        .and_then(|arr| arr.get(0))
+        .and_then(|arr| arr.first())
         .ok_or_else(|| {
             CodexErr::UnexpectedStatus(UnexpectedResponseError {
                 status: StatusCode::OK,
@@ -571,11 +577,10 @@ fn build_completion_stream(
 
 fn extract_reasoning_text(reasoning_val: Option<&JsonValue>) -> Option<String> {
     let value = reasoning_val?;
-    if let Some(s) = value.as_str() {
-        if !s.is_empty() {
+    if let Some(s) = value.as_str()
+        && !s.is_empty() {
             return Some(s.to_string());
         }
-    }
 
     if let Some(obj) = value.as_object() {
         if let Some(s) = obj
@@ -624,14 +629,13 @@ fn build_message_item(message: &JsonValue) -> Option<(ResponseItem, String)> {
         }
         JsonValue::Array(items) => {
             for entry in items {
-                if entry.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    if let Some(text) = entry.get("text").and_then(|t| t.as_str()) {
+                if entry.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && let Some(text) = entry.get("text").and_then(|t| t.as_str()) {
                         combined_text.push_str(text);
                         content.push(ContentItem::OutputText {
                             text: text.to_string(),
                         });
                     }
-                }
             }
         }
         _ => {}
@@ -681,15 +685,15 @@ fn token_usage_from_completion(usage: Option<&JsonValue>) -> Option<TokenUsage> 
     let usage = usage?;
     let input_tokens = usage
         .get("prompt_tokens")
-        .and_then(|v| v.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
     let output_tokens = usage
         .get("completion_tokens")
-        .and_then(|v| v.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or(0);
     let total_tokens = usage
         .get("total_tokens")
-        .and_then(|v| v.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or(input_tokens + output_tokens);
 
     Some(TokenUsage {
