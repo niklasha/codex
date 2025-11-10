@@ -498,6 +498,71 @@ async fn chatgpt_auth_sends_correct_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disable_streaming_posts_non_stream_chat_completion() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let completion = json!({
+        "id": "resp1",
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": "hello from llama"
+            },
+            "finish_reason": "stop"
+        }],
+        "usage": {
+            "prompt_tokens": 3,
+            "completion_tokens": 2,
+            "total_tokens": 5
+        }
+    });
+
+    let template = ResponseTemplate::new(200)
+        .insert_header("content-type", "application/json")
+        .set_body_json(completion);
+
+    Mock::given(method("POST"))
+        .and(path("/api/codex/chat/completions"))
+        .and(body_string_contains("\"stream\":false"))
+        .respond_with(template)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut model_provider = built_in_model_providers()["openai"].clone();
+    model_provider.base_url = Some(format!("{}/api/codex", server.uri()));
+    model_provider.wire_api = WireApi::Chat;
+
+    let codex_home = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&codex_home);
+    config.model_provider = model_provider;
+    config.disable_streaming = true;
+
+    let conversation_manager = ConversationManager::with_auth(create_dummy_codex_auth());
+    let NewConversation {
+        conversation: codex,
+        ..
+    } = conversation_manager
+        .new_conversation(config)
+        .await
+        .expect("create new conversation");
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text { text: "hi".into() }],
+        })
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let request = &server.received_requests().await.unwrap()[0];
+    let body = request.body_json::<serde_json::Value>().unwrap();
+    assert!(!body["stream"].as_bool().unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
     skip_if_no_network!();
 

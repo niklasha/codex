@@ -660,6 +660,9 @@ fn merge_resume_cli_flags(interactive: &mut TuiCli, resume_cli: TuiCli) {
     if resume_cli.web_search {
         interactive.web_search = true;
     }
+    if resume_cli.disable_streaming {
+        interactive.disable_streaming = true;
+    }
     if !resume_cli.images.is_empty() {
         interactive.images = resume_cli.images;
     }

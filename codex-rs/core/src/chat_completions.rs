@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::ModelProviderInfo;
@@ -12,6 +13,7 @@ use crate::error::Result;
 use crate::error::RetryLimitReachedError;
 use crate::error::UnexpectedResponseError;
 use crate::model_family::ModelFamily;
+use crate::protocol::TokenUsage;
 use crate::tools::spec::create_tools_json_for_chat_completions_api;
 use crate::util::backoff;
 use bytes::Bytes;
@@ -27,6 +29,7 @@ use futures::Stream;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use reqwest::StatusCode;
+use serde_json::Value as JsonValue;
 use serde_json::json;
 use std::pin::Pin;
 use std::task::Context;
@@ -51,281 +54,7 @@ pub(crate) async fn stream_chat_completions(
         ));
     }
 
-    // Build messages array
-    let mut messages = Vec::<serde_json::Value>::new();
-
-    let full_instructions = prompt.get_full_instructions(model_family);
-    messages.push(json!({"role": "system", "content": full_instructions}));
-
-    let input = prompt.get_formatted_input();
-
-    // Pre-scan: map Reasoning blocks to the adjacent assistant anchor after the last user.
-    // - If the last emitted message is a user message, drop all reasoning.
-    // - Otherwise, for each Reasoning item after the last user message, attach it
-    //   to the immediate previous assistant message (stop turns) or the immediate
-    //   next assistant anchor (tool-call turns: function/local shell call, or assistant message).
-    let mut reasoning_by_anchor_index: std::collections::HashMap<usize, String> =
-        std::collections::HashMap::new();
-
-    // Determine the last role that would be emitted to Chat Completions.
-    let mut last_emitted_role: Option<&str> = None;
-    for item in &input {
-        match item {
-            ResponseItem::Message { role, .. } => last_emitted_role = Some(role.as_str()),
-            ResponseItem::FunctionCall { .. } | ResponseItem::LocalShellCall { .. } => {
-                last_emitted_role = Some("assistant")
-            }
-            ResponseItem::FunctionCallOutput { .. } => last_emitted_role = Some("tool"),
-            ResponseItem::Reasoning { .. } | ResponseItem::Other => {}
-            ResponseItem::CustomToolCall { .. } => {}
-            ResponseItem::CustomToolCallOutput { .. } => {}
-            ResponseItem::WebSearchCall { .. } => {}
-            ResponseItem::GhostSnapshot { .. } => {}
-        }
-    }
-
-    // Find the last user message index in the input.
-    let mut last_user_index: Option<usize> = None;
-    for (idx, item) in input.iter().enumerate() {
-        if let ResponseItem::Message { role, .. } = item
-            && role == "user"
-        {
-            last_user_index = Some(idx);
-        }
-    }
-
-    // Attach reasoning only if the conversation does not end with a user message.
-    if !matches!(last_emitted_role, Some("user")) {
-        for (idx, item) in input.iter().enumerate() {
-            // Only consider reasoning that appears after the last user message.
-            if let Some(u_idx) = last_user_index
-                && idx <= u_idx
-            {
-                continue;
-            }
-
-            if let ResponseItem::Reasoning {
-                content: Some(items),
-                ..
-            } = item
-            {
-                let mut text = String::new();
-                for entry in items {
-                    match entry {
-                        ReasoningItemContent::ReasoningText { text: segment }
-                        | ReasoningItemContent::Text { text: segment } => text.push_str(segment),
-                    }
-                }
-                if text.trim().is_empty() {
-                    continue;
-                }
-
-                // Prefer immediate previous assistant message (stop turns)
-                let mut attached = false;
-                if idx > 0
-                    && let ResponseItem::Message { role, .. } = &input[idx - 1]
-                    && role == "assistant"
-                {
-                    reasoning_by_anchor_index
-                        .entry(idx - 1)
-                        .and_modify(|v| v.push_str(&text))
-                        .or_insert(text.clone());
-                    attached = true;
-                }
-
-                // Otherwise, attach to immediate next assistant anchor (tool-calls or assistant message)
-                if !attached && idx + 1 < input.len() {
-                    match &input[idx + 1] {
-                        ResponseItem::FunctionCall { .. } | ResponseItem::LocalShellCall { .. } => {
-                            reasoning_by_anchor_index
-                                .entry(idx + 1)
-                                .and_modify(|v| v.push_str(&text))
-                                .or_insert(text.clone());
-                        }
-                        ResponseItem::Message { role, .. } if role == "assistant" => {
-                            reasoning_by_anchor_index
-                                .entry(idx + 1)
-                                .and_modify(|v| v.push_str(&text))
-                                .or_insert(text.clone());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-    }
-
-    // Track last assistant text we emitted to avoid duplicate assistant messages
-    // in the outbound Chat Completions payload (can happen if a final
-    // aggregated assistant message was recorded alongside an earlier partial).
-    let mut last_assistant_text: Option<String> = None;
-
-    for (idx, item) in input.iter().enumerate() {
-        match item {
-            ResponseItem::Message { role, content, .. } => {
-                // Build content either as a plain string (typical for assistant text)
-                // or as an array of content items when images are present (user/tool multimodal).
-                let mut text = String::new();
-                let mut items: Vec<serde_json::Value> = Vec::new();
-                let mut saw_image = false;
-
-                for c in content {
-                    match c {
-                        ContentItem::InputText { text: t }
-                        | ContentItem::OutputText { text: t } => {
-                            text.push_str(t);
-                            items.push(json!({"type":"text","text": t}));
-                        }
-                        ContentItem::InputImage { image_url } => {
-                            saw_image = true;
-                            items.push(json!({"type":"image_url","image_url": {"url": image_url}}));
-                        }
-                    }
-                }
-
-                // Skip exact-duplicate assistant messages.
-                if role == "assistant" {
-                    if let Some(prev) = &last_assistant_text
-                        && prev == &text
-                    {
-                        continue;
-                    }
-                    last_assistant_text = Some(text.clone());
-                }
-
-                // For assistant messages, always send a plain string for compatibility.
-                // For user messages, if an image is present, send an array of content items.
-                let content_value = if role == "assistant" {
-                    json!(text)
-                } else if saw_image {
-                    json!(items)
-                } else {
-                    json!(text)
-                };
-
-                let mut msg = json!({"role": role, "content": content_value});
-                if role == "assistant"
-                    && let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
-                    && let Some(obj) = msg.as_object_mut()
-                {
-                    obj.insert("reasoning".to_string(), json!(reasoning));
-                }
-                messages.push(msg);
-            }
-            ResponseItem::FunctionCall {
-                name,
-                arguments,
-                call_id,
-                ..
-            } => {
-                let mut msg = json!({
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{
-                        "id": call_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": arguments,
-                        }
-                    }]
-                });
-                if let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
-                    && let Some(obj) = msg.as_object_mut()
-                {
-                    obj.insert("reasoning".to_string(), json!(reasoning));
-                }
-                messages.push(msg);
-            }
-            ResponseItem::LocalShellCall {
-                id,
-                call_id: _,
-                status,
-                action,
-            } => {
-                // Confirm with API team.
-                let mut msg = json!({
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{
-                        "id": id.clone().unwrap_or_else(|| "".to_string()),
-                        "type": "local_shell_call",
-                        "status": status,
-                        "action": action,
-                    }]
-                });
-                if let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
-                    && let Some(obj) = msg.as_object_mut()
-                {
-                    obj.insert("reasoning".to_string(), json!(reasoning));
-                }
-                messages.push(msg);
-            }
-            ResponseItem::FunctionCallOutput { call_id, output } => {
-                // Prefer structured content items when available (e.g., images)
-                // otherwise fall back to the legacy plain-string content.
-                let content_value = if let Some(items) = &output.content_items {
-                    let mapped: Vec<serde_json::Value> = items
-                        .iter()
-                        .map(|it| match it {
-                            FunctionCallOutputContentItem::InputText { text } => {
-                                json!({"type":"text","text": text})
-                            }
-                            FunctionCallOutputContentItem::InputImage { image_url } => {
-                                json!({"type":"image_url","image_url": {"url": image_url}})
-                            }
-                        })
-                        .collect();
-                    json!(mapped)
-                } else {
-                    json!(output.content)
-                };
-
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": content_value,
-                }));
-            }
-            ResponseItem::CustomToolCall {
-                id,
-                call_id: _,
-                name,
-                input,
-                status: _,
-            } => {
-                messages.push(json!({
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": [{
-                        "id": id,
-                        "type": "custom",
-                        "custom": {
-                            "name": name,
-                            "input": input,
-                        }
-                    }]
-                }));
-            }
-            ResponseItem::CustomToolCallOutput { call_id, output } => {
-                messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": output,
-                }));
-            }
-            ResponseItem::GhostSnapshot { .. } => {
-                // Ghost snapshots annotate history but are not sent to the model.
-                continue;
-            }
-            ResponseItem::Reasoning { .. }
-            | ResponseItem::WebSearchCall { .. }
-            | ResponseItem::Other => {
-                // Omit these items from the conversation history.
-                continue;
-            }
-        }
-    }
+    let messages = build_chat_messages(prompt, model_family);
 
     let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
     let payload = json!({
@@ -427,6 +156,549 @@ pub(crate) async fn stream_chat_completions(
             }
         }
     }
+}
+
+fn build_chat_messages(prompt: &Prompt, model_family: &ModelFamily) -> Vec<JsonValue> {
+    let mut messages = Vec::<JsonValue>::new();
+    let full_instructions = prompt.get_full_instructions(model_family);
+    messages.push(json!({"role": "system", "content": full_instructions}));
+
+    let input = prompt.get_formatted_input();
+    let mut reasoning_by_anchor_index: HashMap<usize, String> = HashMap::new();
+
+    let mut last_emitted_role: Option<&str> = None;
+    for item in &input {
+        match item {
+            ResponseItem::Message { role, .. } => last_emitted_role = Some(role.as_str()),
+            ResponseItem::FunctionCall { .. } | ResponseItem::LocalShellCall { .. } => {
+                last_emitted_role = Some("assistant")
+            }
+            ResponseItem::FunctionCallOutput { .. } => last_emitted_role = Some("tool"),
+            ResponseItem::Reasoning { .. }
+            | ResponseItem::Other
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::CustomToolCallOutput { .. }
+            | ResponseItem::WebSearchCall { .. }
+            | ResponseItem::GhostSnapshot { .. } => {}
+        }
+    }
+
+    let mut last_user_index: Option<usize> = None;
+    for (idx, item) in input.iter().enumerate() {
+        if let ResponseItem::Message { role, .. } = item
+            && role == "user"
+        {
+            last_user_index = Some(idx);
+        }
+    }
+
+    if !matches!(last_emitted_role, Some("user")) {
+        for (idx, item) in input.iter().enumerate() {
+            if let Some(u_idx) = last_user_index
+                && idx <= u_idx
+            {
+                continue;
+            }
+
+            if let ResponseItem::Reasoning {
+                content: Some(items),
+                ..
+            } = item
+            {
+                let mut text = String::new();
+                for entry in items {
+                    match entry {
+                        ReasoningItemContent::ReasoningText { text: segment }
+                        | ReasoningItemContent::Text { text: segment } => text.push_str(segment),
+                    }
+                }
+                if text.trim().is_empty() {
+                    continue;
+                }
+
+                let mut attached = false;
+                if idx > 0
+                    && let ResponseItem::Message { role, .. } = &input[idx - 1]
+                    && role == "assistant"
+                {
+                    reasoning_by_anchor_index
+                        .entry(idx - 1)
+                        .and_modify(|v| v.push_str(&text))
+                        .or_insert(text.clone());
+                    attached = true;
+                }
+
+                if !attached && idx + 1 < input.len() {
+                    match &input[idx + 1] {
+                        ResponseItem::FunctionCall { .. } | ResponseItem::LocalShellCall { .. } => {
+                            reasoning_by_anchor_index
+                                .entry(idx + 1)
+                                .and_modify(|v| v.push_str(&text))
+                                .or_insert(text.clone());
+                        }
+                        ResponseItem::Message { role, .. } if role == "assistant" => {
+                            reasoning_by_anchor_index
+                                .entry(idx + 1)
+                                .and_modify(|v| v.push_str(&text))
+                                .or_insert(text.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let mut last_assistant_text: Option<String> = None;
+
+    for (idx, item) in input.iter().enumerate() {
+        match item {
+            ResponseItem::Message { role, content, .. } => {
+                let mut text = String::new();
+                let mut items: Vec<JsonValue> = Vec::new();
+                let mut saw_image = false;
+
+                for c in content {
+                    match c {
+                        ContentItem::InputText { text: t }
+                        | ContentItem::OutputText { text: t } => {
+                            text.push_str(t);
+                            items.push(json!({"type":"text","text": t}));
+                        }
+                        ContentItem::InputImage { image_url } => {
+                            saw_image = true;
+                            items.push(json!({"type":"image_url","image_url": {"url": image_url}}));
+                        }
+                    }
+                }
+
+                if role == "assistant" {
+                    if let Some(prev) = &last_assistant_text
+                        && prev == &text
+                    {
+                        continue;
+                    }
+                    last_assistant_text = Some(text.clone());
+                }
+
+                let content_value = if role == "assistant" {
+                    json!(text)
+                } else if saw_image {
+                    json!(items)
+                } else {
+                    json!(text)
+                };
+
+                let mut msg = json!({"role": role, "content": content_value});
+                if role == "assistant"
+                    && let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
+                    && let Some(obj) = msg.as_object_mut()
+                {
+                    obj.insert("reasoning".to_string(), json!(reasoning));
+                }
+                messages.push(msg);
+            }
+            ResponseItem::FunctionCall {
+                name,
+                arguments,
+                call_id,
+                ..
+            } => {
+                let mut msg = json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": call_id,
+                        "type": "function",
+                        "function": {
+                            "name": name,
+                            "arguments": arguments,
+                        }
+                    }]
+                });
+                if let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
+                    && let Some(obj) = msg.as_object_mut()
+                {
+                    obj.insert("reasoning".to_string(), json!(reasoning));
+                }
+                messages.push(msg);
+            }
+            ResponseItem::LocalShellCall {
+                id,
+                call_id: _,
+                status,
+                action,
+            } => {
+                let mut msg = json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": id.clone().unwrap_or_default(),
+                        "type": "local_shell_call",
+                        "status": status,
+                        "action": action,
+                    }]
+                });
+                if let Some(reasoning) = reasoning_by_anchor_index.get(&idx)
+                    && let Some(obj) = msg.as_object_mut()
+                {
+                    obj.insert("reasoning".to_string(), json!(reasoning));
+                }
+                messages.push(msg);
+            }
+            ResponseItem::FunctionCallOutput { call_id, output } => {
+                let content_value = if let Some(items) = &output.content_items {
+                    let mapped: Vec<JsonValue> = items
+                        .iter()
+                        .map(|it| match it {
+                            FunctionCallOutputContentItem::InputText { text } => {
+                                json!({"type":"text","text": text})
+                            }
+                            FunctionCallOutputContentItem::InputImage { image_url } => {
+                                json!({"type":"image_url","image_url": {"url": image_url}})
+                            }
+                        })
+                        .collect();
+                    json!(mapped)
+                } else {
+                    json!(output.content)
+                };
+
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": content_value,
+                }));
+            }
+            ResponseItem::CustomToolCall {
+                id,
+                call_id: _,
+                name,
+                input,
+                status: _,
+            } => {
+                messages.push(json!({
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": id,
+                        "type": "custom",
+                        "custom": {
+                            "name": name,
+                            "input": input,
+                        }
+                    }]
+                }));
+            }
+            ResponseItem::CustomToolCallOutput { call_id, output } => {
+                messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": output,
+                }));
+            }
+            ResponseItem::GhostSnapshot { .. } => {}
+            ResponseItem::Reasoning { .. }
+            | ResponseItem::WebSearchCall { .. }
+            | ResponseItem::Other => {}
+        }
+    }
+
+    messages
+}
+
+pub(crate) async fn complete_chat_completions(
+    prompt: &Prompt,
+    model_family: &ModelFamily,
+    client: &CodexHttpClient,
+    provider: &ModelProviderInfo,
+    otel_event_manager: &OtelEventManager,
+    session_source: &SessionSource,
+    show_raw_agent_reasoning: bool,
+) -> Result<ResponseStream> {
+    if prompt.output_schema.is_some() {
+        return Err(CodexErr::UnsupportedOperation(
+            "output_schema is not supported for Chat Completions API".to_string(),
+        ));
+    }
+
+    let messages = build_chat_messages(prompt, model_family);
+    let tools_json = create_tools_json_for_chat_completions_api(&prompt.tools)?;
+    let payload = json!({
+        "model": model_family.slug,
+        "messages": messages,
+        "stream": false,
+        "tools": tools_json,
+    });
+
+    let mut attempt = 0;
+    let max_retries = provider.request_max_retries();
+    loop {
+        attempt += 1;
+        let mut req_builder = provider.create_request_builder(client, &None).await?;
+
+        if let SessionSource::SubAgent(sub) = session_source.clone() {
+            let subagent = if let SubAgentSource::Other(label) = sub {
+                label
+            } else {
+                serde_json::to_value(&sub)
+                    .ok()
+                    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+                    .unwrap_or_else(|| "other".to_string())
+            };
+            req_builder = req_builder.header("x-openai-subagent", subagent);
+        }
+
+        let res = otel_event_manager
+            .log_request(attempt, || req_builder.json(&payload).send())
+            .await;
+
+        match res {
+            Ok(resp) if resp.status().is_success() => {
+                let body = resp.json::<JsonValue>().await?;
+                return build_completion_stream(body, show_raw_agent_reasoning);
+            }
+            Ok(res) => {
+                let status = res.status();
+                if !(status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()) {
+                    let body = (res.text().await).unwrap_or_default();
+                    return Err(CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                        status,
+                        body,
+                        request_id: None,
+                    }));
+                }
+
+                if attempt > max_retries {
+                    return Err(CodexErr::RetryLimit(RetryLimitReachedError {
+                        status,
+                        request_id: None,
+                    }));
+                }
+
+                let retry_after_secs = res
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+
+                let delay = retry_after_secs
+                    .map(|s| Duration::from_millis(s * 1_000))
+                    .unwrap_or_else(|| backoff(attempt));
+                tokio::time::sleep(delay).await;
+            }
+            Err(e) => {
+                if attempt > max_retries {
+                    return Err(CodexErr::ConnectionFailed(ConnectionFailedError {
+                        source: e,
+                    }));
+                }
+                let delay = backoff(attempt);
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+fn build_completion_stream(
+    body: JsonValue,
+    show_raw_agent_reasoning: bool,
+) -> Result<ResponseStream> {
+    let mut events: Vec<ResponseEvent> = Vec::new();
+    let choice = body
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|arr| arr.get(0))
+        .ok_or_else(|| {
+            CodexErr::UnexpectedStatus(UnexpectedResponseError {
+                status: StatusCode::OK,
+                body: body.to_string(),
+                request_id: None,
+            })
+        })?;
+
+    if let Some(message) = choice.get("message") {
+        if let Some(reasoning_text) = extract_reasoning_text(message.get("reasoning")) {
+            let reasoning_item = build_reasoning_item(reasoning_text.clone());
+            if show_raw_agent_reasoning {
+                events.push(ResponseEvent::OutputItemAdded(reasoning_item.clone()));
+                events.push(ResponseEvent::ReasoningContentDelta(reasoning_text));
+            }
+            events.push(ResponseEvent::OutputItemDone(reasoning_item));
+        }
+
+        if let Some((message_item, combined_text)) = build_message_item(message) {
+            if show_raw_agent_reasoning {
+                events.push(ResponseEvent::OutputItemAdded(message_item.clone()));
+                if !combined_text.is_empty() {
+                    events.push(ResponseEvent::OutputTextDelta(combined_text));
+                }
+            }
+            events.push(ResponseEvent::OutputItemDone(message_item));
+        }
+
+        if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
+            for call in tool_calls {
+                if let Some(item) = build_function_call_item(call) {
+                    events.push(ResponseEvent::OutputItemDone(item));
+                }
+            }
+        }
+    }
+
+    let token_usage = token_usage_from_completion(body.get("usage"));
+    let response_id = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    events.push(ResponseEvent::Completed {
+        response_id,
+        token_usage,
+    });
+
+    let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(events.len().max(1));
+    tokio::spawn(async move {
+        for ev in events {
+            if tx.send(Ok(ev)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    Ok(ResponseStream { rx_event: rx })
+}
+
+fn extract_reasoning_text(reasoning_val: Option<&JsonValue>) -> Option<String> {
+    let value = reasoning_val?;
+    if let Some(s) = value.as_str() {
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+
+    if let Some(obj) = value.as_object() {
+        if let Some(s) = obj
+            .get("text")
+            .and_then(|t| t.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(s.to_string());
+        }
+        if let Some(s) = obj
+            .get("content")
+            .and_then(|t| t.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            return Some(s.to_string());
+        }
+    }
+
+    None
+}
+
+fn build_reasoning_item(text: String) -> ResponseItem {
+    ResponseItem::Reasoning {
+        id: String::new(),
+        summary: Vec::new(),
+        content: Some(vec![ReasoningItemContent::ReasoningText { text }]),
+        encrypted_content: None,
+    }
+}
+
+fn build_message_item(message: &JsonValue) -> Option<(ResponseItem, String)> {
+    let role = message
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or("assistant")
+        .to_string();
+    let content_val = message.get("content")?;
+
+    let mut content = Vec::new();
+    let mut combined_text = String::new();
+
+    match content_val {
+        JsonValue::String(text) => {
+            combined_text.push_str(text);
+            content.push(ContentItem::OutputText { text: text.clone() });
+        }
+        JsonValue::Array(items) => {
+            for entry in items {
+                if entry.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(text) = entry.get("text").and_then(|t| t.as_str()) {
+                        combined_text.push_str(text);
+                        content.push(ContentItem::OutputText {
+                            text: text.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
+    if content.is_empty() {
+        return None;
+    }
+
+    Some((
+        ResponseItem::Message {
+            id: None,
+            role,
+            content,
+        },
+        combined_text,
+    ))
+}
+
+fn build_function_call_item(call: &JsonValue) -> Option<ResponseItem> {
+    let function = call.get("function")?;
+    let name = function
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
+    let arguments = function
+        .get("arguments")
+        .and_then(|a| a.as_str())
+        .unwrap_or("")
+        .to_string();
+    let call_id = call
+        .get("id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Some(ResponseItem::FunctionCall {
+        id: None,
+        name,
+        arguments,
+        call_id,
+    })
+}
+
+fn token_usage_from_completion(usage: Option<&JsonValue>) -> Option<TokenUsage> {
+    let usage = usage?;
+    let input_tokens = usage
+        .get("prompt_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let output_tokens = usage
+        .get("completion_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(input_tokens + output_tokens);
+
+    Some(TokenUsage {
+        input_tokens,
+        cached_input_tokens: 0,
+        output_tokens,
+        reasoning_output_tokens: 0,
+        total_tokens,
+    })
 }
 
 async fn append_assistant_text(

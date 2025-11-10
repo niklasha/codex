@@ -73,6 +73,10 @@ pub struct Cli {
     #[arg(long = "search", default_value_t = false)]
     pub web_search: bool,
 
+    /// Send non-streaming requests to chat-completions providers (disables live token updates; useful for backends that reject streamed tool calls).
+    #[arg(long = "disable-streaming", default_value_t = false)]
+    pub disable_streaming: bool,
+
     /// Additional directories that should be writable alongside the primary workspace.
     #[arg(long = "add-dir", value_name = "DIR", value_hint = ValueHint::DirPath)]
     pub add_dir: Vec<PathBuf>,
