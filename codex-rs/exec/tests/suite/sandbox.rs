@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(all(unix, any(target_os = "linux", target_os = "macos")))]
 use codex_core::protocol::SandboxPolicy;
 use codex_core::spawn::StdioPolicy;
 use std::collections::HashMap;
