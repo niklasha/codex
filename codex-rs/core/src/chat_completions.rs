@@ -455,13 +455,12 @@ pub(crate) async fn complete_chat_completions(
 
         match res {
             Ok(resp) if resp.status().is_success() => {
-                let body = resp
-                    .json::<JsonValue>()
-                    .await
-                    .map_err(|err| CodexErr::ResponseStreamFailed(ResponseStreamFailed {
+                let body = resp.json::<JsonValue>().await.map_err(|err| {
+                    CodexErr::ResponseStreamFailed(ResponseStreamFailed {
                         source: err,
                         request_id: None,
-                    }))?;
+                    })
+                })?;
                 return build_completion_stream(body, show_raw_agent_reasoning);
             }
             Ok(res) => {
@@ -578,9 +577,10 @@ fn build_completion_stream(
 fn extract_reasoning_text(reasoning_val: Option<&JsonValue>) -> Option<String> {
     let value = reasoning_val?;
     if let Some(s) = value.as_str()
-        && !s.is_empty() {
-            return Some(s.to_string());
-        }
+        && !s.is_empty()
+    {
+        return Some(s.to_string());
+    }
 
     if let Some(obj) = value.as_object() {
         if let Some(s) = obj
@@ -630,12 +630,13 @@ fn build_message_item(message: &JsonValue) -> Option<(ResponseItem, String)> {
         JsonValue::Array(items) => {
             for entry in items {
                 if entry.get("type").and_then(|t| t.as_str()) == Some("text")
-                    && let Some(text) = entry.get("text").and_then(|t| t.as_str()) {
-                        combined_text.push_str(text);
-                        content.push(ContentItem::OutputText {
-                            text: text.to_string(),
-                        });
-                    }
+                    && let Some(text) = entry.get("text").and_then(|t| t.as_str())
+                {
+                    combined_text.push_str(text);
+                    content.push(ContentItem::OutputText {
+                        text: text.to_string(),
+                    });
+                }
             }
         }
         _ => {}
