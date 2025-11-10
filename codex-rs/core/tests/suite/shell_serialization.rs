@@ -401,6 +401,12 @@ async fn shell_output_for_freeform_tool_records_duration() -> Result<()> {
     #[cfg(target_os = "macos")]
     let sleep_cmd = vec!["/bin/bash", "-c", "sleep 1"];
 
+    #[cfg(all(
+        unix,
+        not(any(target_os = "linux", target_os = "macos"))
+    ))]
+    let sleep_cmd = vec!["/bin/sh", "-c", "sleep 1"];
+
     #[cfg(windows)]
     let sleep_cmd = "timeout 1";
 
