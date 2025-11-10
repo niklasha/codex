@@ -30,6 +30,7 @@ pub struct ConfigProfile {
     pub experimental_sandbox_command_assessment: Option<bool>,
     pub tools_web_search: Option<bool>,
     pub tools_view_image: Option<bool>,
+    pub disable_streaming: Option<bool>,
     /// Optional feature toggles scoped to this profile.
     #[serde(default)]
     pub features: Option<crate::features::FeaturesToml>,

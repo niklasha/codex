@@ -122,6 +122,9 @@ pub struct Config {
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: bool,
 
+    /// When true, chat completions providers are queried without streaming (disables live token updates).
+    pub disable_streaming: bool,
+
     /// User-provided instructions from AGENTS.md.
     pub user_instructions: Option<String>,
 
@@ -612,6 +615,9 @@ pub struct ConfigToml {
     /// Defaults to `false`.
     pub show_raw_agent_reasoning: Option<bool>,
 
+    /// When set to `true`, chat completions requests are sent without streaming.
+    pub disable_streaming: Option<bool>,
+
     pub model_reasoning_effort: Option<ReasoningEffort>,
     pub model_reasoning_summary: Option<ReasoningSummary>,
     /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).
@@ -838,6 +844,7 @@ pub struct ConfigOverrides {
     pub compact_prompt: Option<String>,
     pub include_apply_patch_tool: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
+    pub disable_streaming: Option<bool>,
     pub tools_web_search_request: Option<bool>,
     pub experimental_sandbox_command_assessment: Option<bool>,
     /// Additional directories that should be treated as writable roots for this session.
@@ -869,6 +876,7 @@ impl Config {
             compact_prompt,
             include_apply_patch_tool: include_apply_patch_tool_override,
             show_raw_agent_reasoning,
+            disable_streaming,
             tools_web_search_request: override_tools_web_search_request,
             experimental_sandbox_command_assessment: sandbox_command_assessment_override,
             additional_writable_roots,
@@ -1134,6 +1142,11 @@ impl Config {
             show_raw_agent_reasoning: cfg
                 .show_raw_agent_reasoning
                 .or(show_raw_agent_reasoning)
+                .unwrap_or(false),
+            disable_streaming: cfg
+                .disable_streaming
+                .or(config_profile.disable_streaming)
+                .or(disable_streaming)
                 .unwrap_or(false),
             model_reasoning_effort: config_profile
                 .model_reasoning_effort
@@ -2883,6 +2896,7 @@ model_verbosity = "high"
                 codex_linux_sandbox_exe: None,
                 hide_agent_reasoning: false,
                 show_raw_agent_reasoning: false,
+                disable_streaming: false,
                 model_reasoning_effort: Some(ReasoningEffort::High),
                 model_reasoning_summary: ReasoningSummary::Detailed,
                 model_verbosity: None,
@@ -2954,6 +2968,7 @@ model_verbosity = "high"
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
             show_raw_agent_reasoning: false,
+            disable_streaming: false,
             model_reasoning_effort: None,
             model_reasoning_summary: ReasoningSummary::default(),
             model_verbosity: None,
@@ -3040,6 +3055,7 @@ model_verbosity = "high"
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
             show_raw_agent_reasoning: false,
+            disable_streaming: false,
             model_reasoning_effort: None,
             model_reasoning_summary: ReasoningSummary::default(),
             model_verbosity: None,
@@ -3112,6 +3128,7 @@ model_verbosity = "high"
             codex_linux_sandbox_exe: None,
             hide_agent_reasoning: false,
             show_raw_agent_reasoning: false,
+            disable_streaming: false,
             model_reasoning_effort: Some(ReasoningEffort::High),
             model_reasoning_summary: ReasoningSummary::Detailed,
             model_verbosity: Some(Verbosity::High),

@@ -33,6 +33,7 @@ use crate::AuthManager;
 use crate::auth::CodexAuth;
 use crate::auth::RefreshTokenError;
 use crate::chat_completions::AggregateStreamExt;
+use crate::chat_completions::complete_chat_completions;
 use crate::chat_completions::stream_chat_completions;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
@@ -144,41 +145,49 @@ impl ModelClient {
         match self.provider.wire_api {
             WireApi::Responses => self.stream_responses(prompt).await,
             WireApi::Chat => {
-                // Create the raw streaming connection first.
-                let response_stream = stream_chat_completions(
-                    prompt,
-                    &self.config.model_family,
-                    &self.client,
-                    &self.provider,
-                    &self.otel_event_manager,
-                    &self.session_source,
-                )
-                .await?;
-
-                // Wrap it with the aggregation adapter so callers see *only*
-                // the final assistant message per turn (matching the
-                // behaviour of the Responses API).
-                let mut aggregated = if self.config.show_raw_agent_reasoning {
-                    crate::chat_completions::AggregatedChatStream::streaming_mode(response_stream)
+                if self.config.disable_streaming {
+                    complete_chat_completions(
+                        prompt,
+                        &self.config.model_family,
+                        &self.client,
+                        &self.provider,
+                        &self.otel_event_manager,
+                        &self.session_source,
+                        self.config.show_raw_agent_reasoning,
+                    )
+                    .await
                 } else {
-                    response_stream.aggregate()
-                };
+                    let response_stream = stream_chat_completions(
+                        prompt,
+                        &self.config.model_family,
+                        &self.client,
+                        &self.provider,
+                        &self.otel_event_manager,
+                        &self.session_source,
+                    )
+                    .await?;
 
-                // Bridge the aggregated stream back into a standard
-                // `ResponseStream` by forwarding events through a channel.
-                let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(16);
+                    let mut aggregated = if self.config.show_raw_agent_reasoning {
+                        crate::chat_completions::AggregatedChatStream::streaming_mode(
+                            response_stream,
+                        )
+                    } else {
+                        response_stream.aggregate()
+                    };
 
-                tokio::spawn(async move {
-                    use futures::StreamExt;
-                    while let Some(ev) = aggregated.next().await {
-                        // Exit early if receiver hung up.
-                        if tx.send(ev).await.is_err() {
-                            break;
+                    let (tx, rx) = mpsc::channel::<Result<ResponseEvent>>(16);
+
+                    tokio::spawn(async move {
+                        use futures::StreamExt;
+                        while let Some(ev) = aggregated.next().await {
+                            if tx.send(ev).await.is_err() {
+                                break;
+                            }
                         }
-                    }
-                });
+                    });
 
-                Ok(ResponseStream { rx_event: rx })
+                    Ok(ResponseStream { rx_event: rx })
+                }
             }
         }
     }
