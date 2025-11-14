@@ -13,6 +13,7 @@ use rdkafka::message::Message;
 use rdkafka::producer::FutureProducer;
 use rdkafka::producer::FutureRecord;
 use rdkafka::producer::Producer;
+use std::fmt;
 use tokio::sync::mpsc;
 use tracing::debug;
 use tracing::info;
@@ -120,32 +121,25 @@ async fn run_kafka(shared_state: SharedState, options: KafkaOptions) -> IoResult
                 match result {
                     Ok(message) => {
                         if let Some(payload) = message.payload() {
-                            match std::str::from_utf8(payload) {
-                                Ok(text) => match serde_json::from_str::<JSONRPCMessage>(text) {
-                                    Ok(json) => {
-                                        if incoming_tx.send(json).await.is_err() {
-                                            break;
-                                        }
-                                        if let Err(err) =
-                                            consumer.commit_message(&message, CommitMode::Async)
-                                        {
-                                            warn!(
-                                                error = ?err,
-                                                topic = %input_topic,
-                                                "failed to commit kafka message"
-                                            );
-                                        }
+                            match parse_kafka_payload(payload) {
+                                Ok(json) => {
+                                    if incoming_tx.send(json).await.is_err() {
+                                        break;
                                     }
-                                    Err(err) => warn!(
-                                        error = %err,
-                                        topic = %input_topic,
-                                        "invalid JSON payload from kafka"
-                                    ),
-                                },
+                                    if let Err(err) =
+                                        consumer.commit_message(&message, CommitMode::Async)
+                                    {
+                                        warn!(
+                                            error = ?err,
+                                            topic = %input_topic,
+                                            "failed to commit kafka message"
+                                        );
+                                    }
+                                }
                                 Err(err) => warn!(
                                     error = %err,
                                     topic = %input_topic,
-                                    "invalid UTF-8 payload from kafka"
+                                    "invalid payload from kafka"
                                 ),
                             }
                         } else {
@@ -167,15 +161,10 @@ async fn run_kafka(shared_state: SharedState, options: KafkaOptions) -> IoResult
     let output_topic = options.output_topic.clone();
     let producer_handle = tokio::spawn(async move {
         while let Some(message) = outgoing_rx.recv().await {
-            let Ok(value) = serde_json::to_value(&message) else {
-                warn!("failed to convert outgoing message to JSON value");
-                continue;
-            };
-            match serde_json::to_string(&value) {
-                Ok(json) => {
-                    let key = kafka_key(&message);
-                    let mut record = FutureRecord::to(&output_topic).payload(&json);
-                    if let Some(ref key) = key {
+            match serialize_outgoing_message(&message) {
+                Ok(serialized) => {
+                    let mut record = FutureRecord::to(&output_topic).payload(&serialized.body);
+                    if let Some(ref key) = serialized.key {
                         record = record.key(key);
                     }
                     if let Err((err, _)) = producer.send(record, Duration::from_secs(0)).await {
@@ -239,4 +228,132 @@ fn request_id_to_string(id: &codex_app_server_protocol::RequestId) -> String {
 
 fn kafka_error(err: KafkaError) -> Error {
     Error::other(err.to_string())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParsedOutgoingMessage {
+    key: Option<String>,
+    body: String,
+}
+
+fn parse_kafka_payload(payload: &[u8]) -> Result<JSONRPCMessage, PayloadError> {
+    let text = std::str::from_utf8(payload).map_err(PayloadError::Utf8)?;
+    let message = serde_json::from_str::<JSONRPCMessage>(text).map_err(PayloadError::Json)?;
+    Ok(message)
+}
+
+fn serialize_outgoing_message(
+    message: &OutgoingMessage,
+) -> Result<ParsedOutgoingMessage, serde_json::Error> {
+    let value = serde_json::to_value(message)?;
+    let body = serde_json::to_string(&value)?;
+    Ok(ParsedOutgoingMessage {
+        key: kafka_key(message),
+        body,
+    })
+}
+
+#[derive(Debug)]
+enum PayloadError {
+    Utf8(std::str::Utf8Error),
+    Json(serde_json::Error),
+}
+
+impl fmt::Display for PayloadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Utf8(err) => write!(f, "{err}"),
+            Self::Json(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl From<PayloadError> for Error {
+    fn from(err: PayloadError) -> Self {
+        Error::other(err.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::outgoing_message::OutgoingError;
+    use crate::outgoing_message::OutgoingNotification;
+    use crate::outgoing_message::OutgoingResponse;
+    use codex_app_server_protocol::JSONRPCErrorError;
+    use codex_app_server_protocol::RequestId;
+    use serde_json::json;
+
+    #[test]
+    fn kafka_options_client_id() {
+        let options =
+            KafkaOptions::new("broker", "in", "out", "group").with_client_id("codex-app-server");
+        assert_eq!(options.client_id.as_deref(), Some("codex-app-server"));
+    }
+
+    #[test]
+    fn kafka_key_for_response_and_error() {
+        let response = OutgoingMessage::Response(OutgoingResponse {
+            id: RequestId::Integer(42),
+            result: json!({"ok":true}),
+        });
+        assert_eq!(kafka_key(&response), Some("42".into()));
+
+        let error = OutgoingMessage::Error(OutgoingError {
+            id: RequestId::String("abc".into()),
+            error: JSONRPCErrorError {
+                code: -1,
+                message: "boom".into(),
+                data: None,
+            },
+        });
+        assert_eq!(kafka_key(&error), Some("abc".into()));
+    }
+
+    #[test]
+    fn parse_kafka_payload_valid() {
+        let payload = br#"{"jsonrpc":"2.0","id":1,"method":"noop","params":{}}"#;
+        let message = parse_kafka_payload(payload).expect("valid payload");
+        match message {
+            JSONRPCMessage::Request(req) => {
+                assert_eq!(req.id, RequestId::Integer(1));
+            }
+            _ => panic!("expected request"),
+        }
+    }
+
+    #[test]
+    fn parse_kafka_payload_invalid_utf8() {
+        let payload = &[0xff, 0xff];
+        let err = parse_kafka_payload(payload).unwrap_err();
+        assert!(matches!(err, PayloadError::Utf8(_)));
+    }
+
+    #[test]
+    fn parse_kafka_payload_invalid_json() {
+        let payload = b"not-json";
+        let err = parse_kafka_payload(payload).unwrap_err();
+        assert!(matches!(err, PayloadError::Json(_)));
+    }
+
+    #[test]
+    fn serialize_outgoing_message_includes_body_and_key() {
+        let response = OutgoingMessage::Response(OutgoingResponse {
+            id: RequestId::Integer(7),
+            result: json!({"ok":true}),
+        });
+        let serialized = serialize_outgoing_message(&response).expect("serialize");
+        assert_eq!(serialized.key.as_deref(), Some("7"));
+        assert!(serialized.body.contains("\"id\":7"));
+    }
+
+    #[test]
+    fn serialize_notification_has_no_key() {
+        let notification = OutgoingMessage::Notification(OutgoingNotification {
+            method: "noop".into(),
+            params: Some(json!({})),
+        });
+        let serialized = serialize_outgoing_message(&notification).expect("serialize");
+        assert!(serialized.key.is_none());
+    }
 }
