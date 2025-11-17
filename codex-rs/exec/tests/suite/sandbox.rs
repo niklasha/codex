@@ -31,6 +31,20 @@ async fn spawn_command_under_sandbox(
     .await
 }
 
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn spawn_command_under_sandbox(
+    _command: Vec<String>,
+    _command_cwd: PathBuf,
+    _sandbox_policy: &SandboxPolicy,
+    _sandbox_cwd: &Path,
+    _stdio_policy: StdioPolicy,
+    _env: HashMap<String, String>,
+) -> std::io::Result<Child> {
+    Err(std::io::Error::other(
+        "sandbox not supported on this platform",
+    ))
+}
+
 #[cfg(target_os = "linux")]
 async fn spawn_command_under_sandbox(
     command: Vec<String>,
@@ -66,6 +80,9 @@ async fn python_multiprocessing_lock_works_under_sandbox() {
     // > normally mounted under /dev/shm.
     #[cfg(target_os = "linux")]
     let writable_roots = vec![PathBuf::from("/dev/shm")];
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let writable_roots = Vec::<PathBuf>::new();
 
     let policy = SandboxPolicy::WorkspaceWrite {
         writable_roots,
@@ -288,6 +305,11 @@ where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = ()> + Send + 'static,
 {
+    if cfg!(not(any(target_os = "linux", target_os = "macos"))) {
+        // Sandbox launcher unsupported on this platform; skip.
+        return Ok(None);
+    }
+
     if std::env::var(IN_SANDBOX_ENV_VAR).is_err() {
         let exe = std::env::current_exe()?;
         let mut cmds = vec![exe.to_string_lossy().into_owned(), "--exact".into()];
