@@ -10,7 +10,8 @@ workspace = true
 keyring = { workspace = true, features = [
     "apple-native",
     "crypto-rust",
-    "linux-native-async-persistent",
+    "linux-native",
+#    "linux-native-async-persistent",
     "windows-native",
 ] }
 tracing = { workspace = true }
