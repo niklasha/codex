@@ -163,6 +163,7 @@ impl SandboxManager {
                     Some("codex-linux-sandbox".to_string()),
                 )
             }
+            SandboxType::OpenbsdPledge => (command, HashMap::new(), None),
             // On Windows, the restricted token sandbox executes in-process via the
             // codex-windows-sandbox crate. We leave the command unchanged here and
             // branch during execution based on the sandbox type.

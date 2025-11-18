@@ -19,6 +19,8 @@ use tokio_util::sync::CancellationToken;
 use crate::error::CodexErr;
 use crate::error::Result;
 use crate::error::SandboxErr;
+#[cfg(target_os = "openbsd")]
+use crate::openbsd_sandbox::spawn_command_under_openbsd_sandbox;
 use crate::protocol::Event;
 use crate::protocol::EventMsg;
 use crate::protocol::ExecCommandOutputDeltaEvent;
@@ -113,6 +115,9 @@ pub enum SandboxType {
 
     /// Only available on Linux.
     LinuxSeccomp,
+
+    /// Only available on OpenBSD.
+    OpenbsdPledge,
 
     /// Only available on Windows.
     WindowsRestrictedToken,
@@ -302,17 +307,22 @@ fn finalize_exec_result(
             let mut timed_out = raw_output.timed_out;
 
             #[cfg(target_family = "unix")]
-            {
-                if let Some(signal) = raw_output.exit_status.signal() {
-                    if signal == TIMEOUT_CODE {
-                        timed_out = true;
-                    } else {
-                        return Err(CodexErr::Sandbox(SandboxErr::Signal(signal)));
-                    }
+            let mut exit_code_from_status = raw_output.exit_status.code();
+            #[cfg(not(target_family = "unix"))]
+            let exit_code_from_status = raw_output.exit_status.code();
+
+            #[cfg(target_family = "unix")]
+            if let Some(signal) = raw_output.exit_status.signal() {
+                if signal == TIMEOUT_CODE {
+                    timed_out = true;
+                } else if sandbox_type == SandboxType::OpenbsdPledge {
+                    exit_code_from_status = Some(EXIT_CODE_SIGNAL_BASE + signal);
+                } else {
+                    return Err(CodexErr::Sandbox(SandboxErr::Signal(signal)));
                 }
             }
 
-            let mut exit_code = raw_output.exit_status.code().unwrap_or(-1);
+            let mut exit_code = exit_code_from_status.unwrap_or(-1);
             if timed_out {
                 exit_code = EXEC_TIMEOUT_EXIT_CODE;
             }
@@ -320,6 +330,7 @@ fn finalize_exec_result(
             let stdout = raw_output.stdout.from_utf8_lossy();
             let stderr = raw_output.stderr.from_utf8_lossy();
             let aggregated_output = raw_output.aggregated_output.from_utf8_lossy();
+
             let exec_output = ExecToolCallOutput {
                 exit_code,
                 stdout,
@@ -336,9 +347,12 @@ fn finalize_exec_result(
             }
 
             if is_likely_sandbox_denied(sandbox_type, &exec_output) {
-                return Err(CodexErr::Sandbox(SandboxErr::Denied {
-                    output: Box::new(exec_output),
-                }));
+                if sandbox_type != SandboxType::OpenbsdPledge {
+                    return Err(CodexErr::Sandbox(SandboxErr::Denied {
+                        output: Box::new(exec_output),
+                    }));
+                }
+                // For OpenBSD pledge, surface the child output to the caller even on denial.
             }
 
             Ok(exec_output)
@@ -386,7 +400,7 @@ pub(crate) fn is_likely_sandbox_denied(
     // 2: misuse of shell builtins
     // 126: permission denied
     // 127: command not found
-    const SANDBOX_DENIED_KEYWORDS: [&str; 7] = [
+    const SANDBOX_DENIED_KEYWORDS: [&str; 8] = [
         "operation not permitted",
         "permission denied",
         "read-only file system",
@@ -394,6 +408,7 @@ pub(crate) fn is_likely_sandbox_denied(
         "sandbox",
         "landlock",
         "failed to write file",
+        "pledge",
     ];
 
     let has_sandbox_keyword = [
@@ -421,9 +436,17 @@ pub(crate) fn is_likely_sandbox_denied(
     #[cfg(unix)]
     {
         const SIGSYS_CODE: i32 = libc::SIGSYS;
-        if sandbox_type == SandboxType::LinuxSeccomp
-            && exec_output.exit_code == EXIT_CODE_SIGNAL_BASE + SIGSYS_CODE
-        {
+        const SIGSYS_EXIT: i32 = EXIT_CODE_SIGNAL_BASE + SIGSYS_CODE;
+
+        if sandbox_type == SandboxType::LinuxSeccomp && exec_output.exit_code == SIGSYS_EXIT {
+            return true;
+        }
+
+        // On OpenBSD pledge(2), many denials yield EPERM or EACCES (exit 1);
+        // treat a non‑zero exit with common denial keywords as sandbox hits even
+        // without SIGSYS.
+        #[cfg(target_os = "openbsd")]
+        if sandbox_type == SandboxType::OpenbsdPledge && has_sandbox_keyword {
             return true;
         }
     }
@@ -508,6 +531,32 @@ async fn exec(
         ))
     })?;
     let arg0_ref = arg0.as_deref();
+    #[cfg(target_os = "openbsd")]
+    let child = if sandbox == SandboxType::OpenbsdPledge {
+        spawn_command_under_openbsd_sandbox(
+            PathBuf::from(program),
+            args.into(),
+            arg0_ref,
+            cwd,
+            sandbox_policy,
+            StdioPolicy::RedirectForShellTool,
+            env,
+        )
+        .await?
+    } else {
+        spawn_child_async(
+            PathBuf::from(program),
+            args.into(),
+            arg0_ref,
+            cwd,
+            sandbox_policy,
+            StdioPolicy::RedirectForShellTool,
+            env,
+        )
+        .await?
+    };
+
+    #[cfg(not(target_os = "openbsd"))]
     let child = spawn_child_async(
         PathBuf::from(program),
         args.into(),
@@ -818,17 +867,15 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn kill_child_process_group_kills_grandchildren_on_timeout() -> Result<()> {
-        // On Linux/macOS, /bin/bash is typically present; on FreeBSD/OpenBSD,
-        // prefer /bin/sh to avoid NotFound errors.
-        #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
+        let shell = std::env::var("SHELL").unwrap_or_else(|_| {
+            if cfg!(any(target_os = "freebsd", target_os = "openbsd")) {
+                "/bin/sh".to_string()
+            } else {
+                "/bin/bash".to_string()
+            }
+        });
         let command = vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            "sleep 60 & echo $!; sleep 60".to_string(),
-        ];
-        #[cfg(all(unix, not(any(target_os = "freebsd", target_os = "openbsd"))))]
-        let command = vec![
-            "/bin/bash".to_string(),
+            shell,
             "-c".to_string(),
             "sleep 60 & echo $!; sleep 60".to_string(),
         ];

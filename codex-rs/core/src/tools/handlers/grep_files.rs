@@ -121,10 +121,15 @@ async fn run_rg_search(
     command
         .current_dir(cwd)
         .arg("--files-with-matches")
-        .arg("--sortr=modified")
         .arg("--regexp")
         .arg(pattern)
         .arg("--no-messages");
+
+    // Sorting by modified time isn't supported on all platforms (e.g., some BSD builds of ripgrep
+    // when /proc isn't available). Make it best-effort and skip if unsupported.
+    if cfg!(target_os = "linux") {
+        command.arg("--sortr=modified");
+    }
 
     if let Some(glob) = include {
         command.arg("--glob").arg(glob);

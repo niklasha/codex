@@ -138,7 +138,13 @@ fn get_zsh_shell(path: Option<&PathBuf>) -> Option<Shell> {
 }
 
 fn get_bash_shell(path: Option<&PathBuf>) -> Option<Shell> {
-    let shell_path = get_shell_path(ShellType::Bash, path, "bash", vec!["/bin/bash"]);
+    let mut fallbacks = vec!["/bin/bash"];
+    #[cfg(target_os = "openbsd")]
+    {
+        fallbacks.insert(0, "/usr/local/bin/bash");
+    }
+
+    let shell_path = get_shell_path(ShellType::Bash, path, "bash", fallbacks);
 
     shell_path.map(|shell_path| Shell {
         shell_type: ShellType::Bash,
@@ -236,24 +242,33 @@ pub fn default_user_shell() -> Shell {
 
 fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Shell {
     if cfg!(windows) {
-        get_shell(ShellType::PowerShell, None).unwrap_or(ultimate_fallback_shell())
-    } else {
-        let user_default_shell = user_shell_path
-            .and_then(|shell| detect_shell_type(&shell))
-            .and_then(|shell_type| get_shell(shell_type, None));
-
-        let shell_with_fallback = if cfg!(target_os = "macos") {
-            user_default_shell
-                .or_else(|| get_shell(ShellType::Zsh, None))
-                .or_else(|| get_shell(ShellType::Bash, None))
-        } else {
-            user_default_shell
-                .or_else(|| get_shell(ShellType::Bash, None))
-                .or_else(|| get_shell(ShellType::Zsh, None))
-        };
-
-        shell_with_fallback.unwrap_or(ultimate_fallback_shell())
+        return get_shell(ShellType::PowerShell, None).unwrap_or(ultimate_fallback_shell());
     }
+
+    // On OpenBSD, always prefer package bash over the login shell to avoid
+    // pledge redirect aborts in /bin/sh (ksh).
+    #[cfg(target_os = "openbsd")]
+    if let Some(bash) = get_shell(ShellType::Bash, None) {
+        return bash;
+    }
+
+    let user_default_shell = user_shell_path
+        .and_then(|shell| detect_shell_type(&shell))
+        .and_then(|shell_type| get_shell(shell_type, None));
+
+    let shell_with_fallback = if cfg!(target_os = "macos") {
+        user_default_shell
+            .or_else(|| get_shell(ShellType::Zsh, None))
+            .or_else(|| get_shell(ShellType::Bash, None))
+    } else {
+        user_default_shell
+            .or_else(|| get_shell(ShellType::Bash, None))
+            .or_else(|| get_shell(ShellType::Zsh, None))
+    };
+
+    shell_with_fallback.unwrap_or(ultimate_fallback_shell())
+}
+
 }
 
 #[cfg(test)]

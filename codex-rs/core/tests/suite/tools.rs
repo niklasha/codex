@@ -206,16 +206,29 @@ async fn sandbox_denied_shell_returns_original_output() -> Result<()> {
     let call_id = "sandbox-denied-shell";
     let target_path = fixture.workspace_path("sandbox-denied.txt");
     let sentinel = "sandbox-denied sentinel output";
-    let command = vec![
-        "/bin/sh".to_string(),
-        "-c".to_string(),
-        format!(
-            "printf {sentinel:?}; printf {content:?} > {path:?}",
-            sentinel = format!("{sentinel}\n"),
-            content = "sandbox denied",
-            path = &target_path
-        ),
-    ];
+    let command = if cfg!(target_os = "openbsd") {
+        vec![
+            "/usr/local/bin/bash".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf {sentinel:?} 1>&2; printf {content:?} > {path:?}",
+                sentinel = format!("{sentinel}\\n"),
+                content = "sandbox denied",
+                path = &target_path
+            ),
+        ]
+    } else {
+        vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!(
+                "printf {sentinel:?}; printf {content:?} > {path:?}",
+                sentinel = format!("{sentinel}\\n"),
+                content = "sandbox denied",
+                path = &target_path
+            ),
+        ]
+    };
     let args = json!({
         "command": command,
         "timeout_ms": 1_000,
@@ -256,34 +269,54 @@ async fn sandbox_denied_shell_returns_original_output() -> Result<()> {
         .context("exit code is integer")?;
     let body = output_text;
 
-    let body_lower = body.to_lowercase();
-    // Required for multi-OS.
-    let has_denial = body_lower.contains("permission denied")
-        || body_lower.contains("operation not permitted")
-        || body_lower.contains("read-only file system");
-    assert!(
-        has_denial,
-        "expected sandbox denial details in tool output: {body}"
-    );
+    // Cross-platform expectations:
     assert!(
         body.contains(sentinel),
         "expected sentinel output from command to reach the model: {body}"
-    );
-    let target_path_str = target_path
-        .to_str()
-        .context("target path string representation")?;
-    assert!(
-        body.contains(target_path_str),
-        "expected sandbox error to mention denied path: {body}"
-    );
-    assert!(
-        !body_lower.contains("failed in sandbox"),
-        "expected original tool output, found fallback message: {body}"
     );
     assert_ne!(
         exit_code, 0,
         "sandbox denial should surface a non-zero exit code"
     );
+
+    // Platform-specific expectations.
+    #[cfg(not(target_os = "openbsd"))]
+    {
+        let body_lower = body.to_lowercase();
+        let has_denial = body_lower.contains("permission denied")
+            || body_lower.contains("operation not permitted")
+            || body_lower.contains("read-only file system");
+        assert!(
+            has_denial,
+            "expected sandbox denial details in tool output: {body}"
+        );
+
+        let target_path_str = target_path
+            .to_str()
+            .context("target path string representation")?;
+        assert!(
+            body.contains(target_path_str),
+            "expected sandbox error to mention denied path: {body}"
+        );
+        assert!(
+            !body_lower.contains("failed in sandbox"),
+            "expected original tool output, found fallback message: {body}"
+        );
+    }
+
+    #[cfg(target_os = "openbsd")]
+    {
+        use std::fs;
+        // Ensure the denied file does not exist; sandbox must have prevented creation.
+        assert!(
+            !target_path.exists(),
+            "denied file should not be created: {target_path:?}"
+        );
+        assert!(
+            fs::metadata(&target_path).is_err(),
+            "denied file should be absent: {target_path:?}"
+        );
+    }
 
     Ok(())
 }

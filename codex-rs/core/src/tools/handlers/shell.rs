@@ -34,8 +34,13 @@ pub struct ShellCommandHandler;
 
 impl ShellHandler {
     fn to_exec_params(params: ShellToolCallParams, turn_context: &TurnContext) -> ExecParams {
+        #[cfg(target_os = "openbsd")]
+        let command = params.command.clone(); // use provided argv directly
+        #[cfg(not(target_os = "openbsd"))]
+        let command = params.command;
+
         ExecParams {
-            command: params.command,
+            command,
             cwd: turn_context.resolve_path(params.workdir.clone()),
             expiration: params.timeout_ms.into(),
             env: create_env(&turn_context.shell_environment_policy),
@@ -49,12 +54,20 @@ impl ShellHandler {
 impl ShellCommandHandler {
     fn to_exec_params(
         params: ShellCommandToolCallParams,
-        session: &crate::codex::Session,
+        _session: &crate::codex::Session,
         turn_context: &TurnContext,
     ) -> ExecParams {
-        let shell = session.user_shell();
-        let use_login_shell = true;
-        let command = shell.derive_exec_args(&params.command, use_login_shell);
+        // On OpenBSD, avoid wrapping in the user shell because /bin/sh (ksh)
+        // self-pledges and aborts under the sandbox. Use the provided argv
+        // directly so callers can pick a safe shell (e.g., /usr/local/bin/bash).
+        #[cfg(target_os = "openbsd")]
+        let command = shlex::split(&params.command).unwrap_or_else(|| vec![params.command.clone()]);
+        #[cfg(not(target_os = "openbsd"))]
+        let command = {
+            let shell = session.user_shell();
+            let use_login_shell = true;
+            shell.derive_exec_args(&params.command, use_login_shell)
+        };
 
         ExecParams {
             command,

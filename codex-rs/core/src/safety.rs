@@ -101,6 +101,8 @@ pub fn get_platform_sandbox() -> Option<SandboxType> {
         Some(SandboxType::MacosSeatbelt)
     } else if cfg!(target_os = "linux") {
         Some(SandboxType::LinuxSeccomp)
+    } else if cfg!(target_os = "openbsd") {
+        Some(SandboxType::OpenbsdPledge)
     } else if cfg!(target_os = "windows") {
         #[cfg(target_os = "windows")]
         {
