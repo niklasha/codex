@@ -1,4 +1,4 @@
-#![cfg(not(target_os = "windows"))]
+#![cfg(not(any(target_os = "windows", target_os = "openbsd")))]
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;

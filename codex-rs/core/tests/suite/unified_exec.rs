@@ -762,14 +762,20 @@ async fn unified_exec_emits_begin_event_for_write_stdin_requests() -> Result<()>
         .iter()
         .find(|ev| ev.call_id == open_call_id)
         .expect("missing exec_command begin");
-    assert_eq!(
-        open_event.command,
-        vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "/bin/sh -c echo ready".to_string()
-        ]
-    );
+    #[cfg(target_os = "openbsd")]
+    #[cfg(target_os = "openbsd")]
+    let expected_start_command = vec![
+        "/usr/local/bin/bash".to_string(),
+        "-lc".to_string(),
+        "/bin/sh -c echo ready".to_string(),
+    ];
+    #[cfg(not(target_os = "openbsd"))]
+    let expected_start_command = vec![
+        "/bin/bash".to_string(),
+        "-lc".to_string(),
+        "/bin/sh -c echo ready".to_string(),
+    ];
+    assert_eq!(open_event.command, expected_start_command);
     assert!(
         open_event.interaction_input.is_none(),
         "startup begin events should not include interaction input"
@@ -780,14 +786,19 @@ async fn unified_exec_emits_begin_event_for_write_stdin_requests() -> Result<()>
         .iter()
         .find(|ev| ev.call_id == poll_call_id)
         .expect("missing write_stdin begin");
-    assert_eq!(
-        poll_event.command,
-        vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "/bin/sh -c echo ready".to_string()
-        ]
-    );
+    #[cfg(target_os = "openbsd")]
+    let expected_command = vec![
+        "/usr/local/bin/bash".to_string(),
+        "-lc".to_string(),
+        "/bin/sh -c echo ready".to_string(),
+    ];
+    #[cfg(not(target_os = "openbsd"))]
+    let expected_command = vec![
+        "/bin/bash".to_string(),
+        "-lc".to_string(),
+        "/bin/sh -c echo ready".to_string(),
+    ];
+    assert_eq!(poll_event.command, expected_command);
     assert!(
         poll_event.interaction_input.is_none(),
         "poll begin events should omit interaction input"
