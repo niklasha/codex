@@ -346,14 +346,14 @@ fn finalize_exec_result(
                 }));
             }
 
-            if is_likely_sandbox_denied(sandbox_type, &exec_output) {
-                if sandbox_type != SandboxType::OpenbsdPledge {
-                    return Err(CodexErr::Sandbox(SandboxErr::Denied {
-                        output: Box::new(exec_output),
-                    }));
-                }
-                // For OpenBSD pledge, surface the child output to the caller even on denial.
+            if is_likely_sandbox_denied(sandbox_type, &exec_output)
+                && sandbox_type != SandboxType::OpenbsdPledge
+            {
+                return Err(CodexErr::Sandbox(SandboxErr::Denied {
+                    output: Box::new(exec_output),
+                }));
             }
+            // For OpenBSD pledge, surface the child output to the caller even on denial.
 
             Ok(exec_output)
         }

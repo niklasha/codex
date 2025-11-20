@@ -32,6 +32,11 @@ use serde_json::Value;
 use serde_json::json;
 use tokio::time::Duration;
 
+#[cfg(target_os = "openbsd")]
+const DEFAULT_BASH: &str = "/usr/local/bin/bash";
+#[cfg(not(target_os = "openbsd"))]
+const DEFAULT_BASH: &str = "/bin/bash";
+
 fn extract_output_text(item: &Value) -> Option<&str> {
     item.get("output").and_then(|value| match value {
         Value::String(text) => Some(text.as_str()),
@@ -154,6 +159,7 @@ fn collect_tool_outputs(bodies: &[Value]) -> Result<HashMap<String, ParsedUnifie
     Ok(outputs)
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_emits_exec_command_begin_event() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -218,7 +224,7 @@ async fn unified_exec_emits_exec_command_begin_event() -> Result<()> {
     assert_eq!(
         begin_event.command,
         vec![
-            "/bin/bash".to_string(),
+            DEFAULT_BASH.to_string(),
             "-lc".to_string(),
             "/bin/echo hello unified exec".to_string()
         ]
@@ -230,6 +236,7 @@ async fn unified_exec_emits_exec_command_begin_event() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "flaky"]
 async fn unified_exec_respects_workdir_override() -> Result<()> {
@@ -309,6 +316,7 @@ async fn unified_exec_respects_workdir_override() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_emits_exec_command_end_event() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -395,6 +403,7 @@ async fn unified_exec_emits_exec_command_end_event() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_emits_output_delta_for_exec_command() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -466,6 +475,7 @@ async fn unified_exec_emits_output_delta_for_exec_command() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_emits_output_delta_for_write_stdin() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -486,7 +496,7 @@ async fn unified_exec_emits_output_delta_for_write_stdin() -> Result<()> {
 
     let open_call_id = "uexec-open";
     let open_args = json!({
-        "cmd": "/bin/bash -i",
+        "cmd": format!("{DEFAULT_BASH} -i"),
         "yield_time_ms": 200,
     });
 
@@ -565,6 +575,7 @@ async fn unified_exec_emits_output_delta_for_write_stdin() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_emits_begin_for_write_stdin() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -649,9 +660,9 @@ async fn unified_exec_emits_begin_for_write_stdin() -> Result<()> {
     assert_eq!(
         begin_event.command,
         vec![
-            "/bin/bash".to_string(),
+            DEFAULT_BASH.to_string(),
             "-lc".to_string(),
-            "/bin/sh -c echo ready".to_string()
+            "/bin/sh -c echo ready".to_string(),
         ]
     );
     assert_eq!(
@@ -667,6 +678,7 @@ async fn unified_exec_emits_begin_for_write_stdin() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_emits_begin_event_for_write_stdin_requests() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -762,16 +774,8 @@ async fn unified_exec_emits_begin_event_for_write_stdin_requests() -> Result<()>
         .iter()
         .find(|ev| ev.call_id == open_call_id)
         .expect("missing exec_command begin");
-    #[cfg(target_os = "openbsd")]
-    #[cfg(target_os = "openbsd")]
     let expected_start_command = vec![
-        "/usr/local/bin/bash".to_string(),
-        "-lc".to_string(),
-        "/bin/sh -c echo ready".to_string(),
-    ];
-    #[cfg(not(target_os = "openbsd"))]
-    let expected_start_command = vec![
-        "/bin/bash".to_string(),
+        DEFAULT_BASH.to_string(),
         "-lc".to_string(),
         "/bin/sh -c echo ready".to_string(),
     ];
@@ -786,15 +790,8 @@ async fn unified_exec_emits_begin_event_for_write_stdin_requests() -> Result<()>
         .iter()
         .find(|ev| ev.call_id == poll_call_id)
         .expect("missing write_stdin begin");
-    #[cfg(target_os = "openbsd")]
     let expected_command = vec![
-        "/usr/local/bin/bash".to_string(),
-        "-lc".to_string(),
-        "/bin/sh -c echo ready".to_string(),
-    ];
-    #[cfg(not(target_os = "openbsd"))]
-    let expected_command = vec![
-        "/bin/bash".to_string(),
+        DEFAULT_BASH.to_string(),
         "-lc".to_string(),
         "/bin/sh -c echo ready".to_string(),
     ];
@@ -808,6 +805,7 @@ async fn unified_exec_emits_begin_event_for_write_stdin_requests() -> Result<()>
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn exec_command_reports_chunk_and_exit_metadata() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -915,6 +913,7 @@ async fn exec_command_reports_chunk_and_exit_metadata() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_respects_early_exit_notifications() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -1166,6 +1165,7 @@ async fn write_stdin_returns_exit_metadata_and_clears_session() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_emits_end_event_when_session_dies_via_stdin() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -1270,6 +1270,7 @@ async fn unified_exec_emits_end_event_when_session_dies_via_stdin() -> Result<()
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_reuses_session_via_stdin() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -1378,6 +1379,7 @@ async fn unified_exec_reuses_session_via_stdin() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_streams_after_lagged_output() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -1509,6 +1511,7 @@ PY
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -1613,6 +1616,7 @@ async fn unified_exec_timeout_and_followup_poll() -> Result<()> {
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 // Skipped on arm because the ctor logic to handle arg0 doesn't work on ARM
 #[cfg(not(target_arch = "arm"))]
@@ -1700,6 +1704,7 @@ PY
     Ok(())
 }
 
+#[cfg_attr(target_os = "openbsd", serial_test::serial(unified_exec))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_runs_under_sandbox() -> Result<()> {
     skip_if_no_network!(Ok(()));

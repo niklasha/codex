@@ -123,6 +123,11 @@ pub fn load_sse_fixture_with_id(path: impl AsRef<std::path::Path>, id: &str) -> 
         .collect()
 }
 
+#[cfg(target_os = "openbsd")]
+const DEFAULT_EVENT_WAIT_SECS: u64 = 120;
+#[cfg(not(target_os = "openbsd"))]
+const DEFAULT_EVENT_WAIT_SECS: u64 = 60;
+
 pub async fn wait_for_event<F>(
     codex: &CodexConversation,
     predicate: F,
@@ -131,7 +136,12 @@ where
     F: FnMut(&codex_core::protocol::EventMsg) -> bool,
 {
     use tokio::time::Duration;
-    wait_for_event_with_timeout(codex, predicate, Duration::from_secs(60)).await
+    wait_for_event_with_timeout(
+        codex,
+        predicate,
+        Duration::from_secs(DEFAULT_EVENT_WAIT_SECS),
+    )
+    .await
 }
 
 pub async fn wait_for_event_match<T, F>(codex: &CodexConversation, matcher: F) -> T

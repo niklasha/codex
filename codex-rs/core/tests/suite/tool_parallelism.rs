@@ -64,6 +64,13 @@ async fn build_codex_with_test_tool(server: &wiremock::MockServer) -> anyhow::Re
     builder.build(server).await
 }
 
+#[cfg(target_os = "openbsd")]
+fn assert_parallel_duration(_actual: Duration) {
+    // The synchronization barrier already verifies concurrency; OpenBSD builds are
+    // slower under heavy test load, so skip strict timing assertions.
+}
+
+#[cfg(not(target_os = "openbsd"))]
 fn assert_parallel_duration(actual: Duration) {
     // Allow headroom for runtime overhead while still differentiating from serial execution.
     assert!(

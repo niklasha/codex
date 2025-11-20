@@ -1,4 +1,3 @@
-#![cfg(target_os = "openbsd")]
 //! OpenBSD pledge-based sandbox backend (no unveil).
 //! Applies pledge/execpromises in pre_exec; the parent process remains
 //! unaffected. Note: some shells (ksh) re-pledge in ways that require
@@ -7,6 +6,7 @@
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::io;
+use std::io::ErrorKind;
 use std::path::PathBuf;
 
 use tokio::process::Child;
@@ -79,7 +79,7 @@ fn build_openbsd_sandbox_plan(policy: &SandboxPolicy) -> io::Result<Option<Openb
     match policy {
         SandboxPolicy::DangerFullAccess => Ok(None),
         SandboxPolicy::ReadOnly | SandboxPolicy::WorkspaceWrite { .. } => {
-            let (promises, exec_promises) = openbsd_promises(policy);
+            let (promises, exec_promises) = openbsd_promises(policy)?;
             Ok(Some(OpenbsdSandboxPlan {
                 promises,
                 exec_promises,
@@ -88,7 +88,7 @@ fn build_openbsd_sandbox_plan(policy: &SandboxPolicy) -> io::Result<Option<Openb
     }
 }
 
-fn openbsd_promises(policy: &SandboxPolicy) -> (CString, CString) {
+fn openbsd_promises(policy: &SandboxPolicy) -> io::Result<(CString, CString)> {
     // Base: stdio+read, process mgmt, exec, tty/pty, unix sockets.
     let mut pre_exec = vec!["stdio", "rpath", "getpw", "proc", "exec", "tty", "unix"];
 
@@ -105,10 +105,11 @@ fn openbsd_promises(policy: &SandboxPolicy) -> (CString, CString) {
         post_exec.retain(|p| *p != "wpath" && *p != "cpath" && *p != "fattr");
     }
 
-    let merged = CString::new(pre_exec.join(" ")).expect("promises cstring");
-    let exec_merged = CString::new(post_exec.join(" ")).expect("exec_promises cstring");
+    Ok((join_promises(&pre_exec)?, join_promises(&post_exec)?))
+}
 
-    (merged, exec_merged)
+fn join_promises(parts: &[&str]) -> io::Result<CString> {
+    CString::new(parts.join(" ")).map_err(|err| io::Error::new(ErrorKind::InvalidInput, err))
 }
 
 fn apply_openbsd_sandbox(plan: &OpenbsdSandboxPlan) -> io::Result<()> {
