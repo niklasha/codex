@@ -31,7 +31,7 @@ async fn spawn_command_under_sandbox(
     .await
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "openbsd")))]
 async fn spawn_command_under_sandbox(
     _command: Vec<String>,
     _command_cwd: PathBuf,
@@ -43,6 +43,38 @@ async fn spawn_command_under_sandbox(
     Err(std::io::Error::other(
         "sandbox not supported on this platform",
     ))
+}
+
+#[cfg(target_os = "openbsd")]
+async fn spawn_command_under_sandbox(
+    command: Vec<String>,
+    command_cwd: PathBuf,
+    sandbox_policy: &SandboxPolicy,
+    _sandbox_cwd: &Path,
+    stdio_policy: StdioPolicy,
+    env: HashMap<String, String>,
+) -> std::io::Result<Child> {
+    use codex_core::openbsd_sandbox::spawn_command_under_openbsd_sandbox;
+
+    let mut parts = command.into_iter();
+    let program = parts.next().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "sandbox command must not be empty",
+        )
+    })?;
+    let args: Vec<String> = parts.collect();
+
+    spawn_command_under_openbsd_sandbox(
+        PathBuf::from(program),
+        args,
+        None,
+        command_cwd,
+        sandbox_policy,
+        stdio_policy,
+        env,
+    )
+    .await
 }
 
 #[cfg(target_os = "linux")]
@@ -68,6 +100,10 @@ async fn spawn_command_under_sandbox(
     .await
 }
 
+#[cfg_attr(
+    target_os = "openbsd",
+    ignore = "pledge sandbox lacks multiprocessing compatibility without unveil"
+)]
 #[tokio::test]
 async fn python_multiprocessing_lock_works_under_sandbox() {
     core_test_support::skip_if_sandbox!();
@@ -127,6 +163,10 @@ if __name__ == '__main__':
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "openbsd",
+    ignore = "pledge-only sandbox lacks per-directory filtering without unveil"
+)]
 async fn sandbox_distinguishes_command_and_policy_cwds() {
     core_test_support::skip_if_sandbox!();
     let temp = tempfile::tempdir().expect("should be able to create temp dir");
