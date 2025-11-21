@@ -117,6 +117,13 @@ impl StatusIndicatorWidget {
         self.frame_requester.schedule_frame();
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_elapsed_seconds_for_test(&mut self, seconds: u64) {
+        self.elapsed_running = Duration::from_secs(seconds);
+        self.last_resume_at = Instant::now();
+        self.is_paused = true;
+    }
+
     fn elapsed_duration_at(&self, now: Instant) -> Duration {
         let mut elapsed = self.elapsed_running;
         if !self.is_paused {

@@ -130,6 +130,11 @@ impl BottomPane {
         self.context_window_percent
     }
 
+    #[cfg(test)]
+    pub fn status_widget_mut_for_tests(&mut self) -> Option<&mut StatusIndicatorWidget> {
+        self.status.as_mut()
+    }
+
     fn active_view(&self) -> Option<&dyn BottomPaneView> {
         self.view_stack.last().map(std::convert::AsRef::as_ref)
     }
