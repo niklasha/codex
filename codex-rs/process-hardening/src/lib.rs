@@ -122,7 +122,13 @@ pub(crate) fn pre_main_hardening_macos() {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "openbsd",
+))]
 fn set_core_file_size_limit_to_zero() {
     let rlim = libc::rlimit {
         rlim_cur: 0,

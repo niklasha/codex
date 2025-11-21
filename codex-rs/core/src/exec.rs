@@ -439,12 +439,18 @@ pub(crate) fn is_likely_sandbox_denied(
             return true;
         }
 
-        // On OpenBSD pledge(2), many denials yield EPERM or EACCES (exit 1);
-        // treat a non‑zero exit with common denial keywords as sandbox hits even
-        // without SIGSYS.
         #[cfg(target_os = "openbsd")]
-        if sandbox_type == SandboxType::OpenbsdPledge && has_sandbox_keyword {
-            return true;
+        {
+            const SIGABRT_CODE: i32 = libc::SIGABRT;
+            const SIGABRT_EXIT: i32 = EXIT_CODE_SIGNAL_BASE + SIGABRT_CODE;
+            if sandbox_type == SandboxType::OpenbsdPledge
+                && exec_output.exit_code == SIGABRT_EXIT
+            {
+                return true;
+            }
+            if sandbox_type == SandboxType::OpenbsdPledge && has_sandbox_keyword {
+                return true;
+            }
         }
     }
 

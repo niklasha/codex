@@ -12,6 +12,7 @@ use codex_core::CodexAuth;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
+use codex_core::config::OPENAI_DEFAULT_MODEL;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -56,6 +57,9 @@ use crossterm::event::KeyEvent;
 use crossterm::event::KeyModifiers;
 use insta::assert_snapshot;
 use pretty_assertions::assert_eq;
+use std::fs::File;
+use std::io::BufRead;
+use std::io::BufReader;
 use std::path::PathBuf;
 use tempfile::NamedTempFile;
 use tempfile::tempdir;
@@ -75,6 +79,70 @@ fn test_config() -> Config {
         std::env::temp_dir(),
     )
     .expect("config")
+}
+
+// Backward-compat shim for older session logs that predate the
+// `formatted_output` field on ExecCommandEnd events.
+fn upgrade_event_payload_for_tests(mut payload: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = payload.as_object_mut()
+        && let Some(msg) = obj.get_mut("msg")
+        && let Some(m) = msg.as_object_mut()
+    {
+        let ty = m.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if ty == "exec_command_end" {
+            let stdout = m.get("stdout").and_then(|v| v.as_str()).unwrap_or("");
+            let stderr = m.get("stderr").and_then(|v| v.as_str()).unwrap_or("");
+            let aggregated = if stderr.is_empty() {
+                stdout.to_string()
+            } else {
+                format!("{stdout}{stderr}")
+            };
+            if !m.contains_key("formatted_output") {
+                m.insert(
+                    "formatted_output".to_string(),
+                    serde_json::Value::String(aggregated.clone()),
+                );
+            }
+            if !m.contains_key("aggregated_output") {
+                m.insert(
+                    "aggregated_output".to_string(),
+                    serde_json::Value::String(aggregated),
+                );
+            }
+        } else if ty == "patch_apply_begin"
+            && let Some(changes) = m.get_mut("changes").and_then(|v| v.as_object_mut())
+        {
+            for change in changes.values_mut() {
+                if change.get("type").is_some() {
+                    continue;
+                }
+                if let Some(change_obj) = change.as_object_mut()
+                    && change_obj.len() == 1
+                    && let Some((legacy_kind, legacy_value)) = change_obj
+                        .iter()
+                        .next()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                {
+                    change_obj.clear();
+                    change_obj.insert(
+                        "type".to_string(),
+                        serde_json::Value::String(legacy_kind.clone()),
+                    );
+                    match legacy_value {
+                        serde_json::Value::Object(payload) => {
+                            for (k, v) in payload {
+                                change_obj.insert(k, v);
+                            }
+                        }
+                        other => {
+                            change_obj.insert("content".to_string(), other);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    payload
 }
 
 fn snapshot(percent: f64) -> RateLimitSnapshot {
@@ -785,6 +853,30 @@ fn active_blob(chat: &ChatWidget) -> String {
         .expect("active cell present")
         .display_lines(80);
     lines_to_single_string(&lines)
+}
+
+fn open_fixture(name: &str) -> File {
+    // 1) Prefer fixtures within this crate
+    {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("tests");
+        p.push("fixtures");
+        p.push(name);
+        if let Ok(f) = File::open(&p) {
+            return f;
+        }
+    }
+    // 2) Fallback to parent (workspace root)
+    {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("..");
+        p.push(name);
+        if let Ok(f) = File::open(&p) {
+            return f;
+        }
+    }
+    // 3) Last resort: CWD
+    File::open(name).expect("open fixture file")
 }
 
 #[test]
@@ -1892,6 +1984,7 @@ async fn binary_size_transcript_snapshot() {
                                 id: ev.id,
                                 msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
                                     call_id: e.call_id.clone(),
+                                    turn_id: e.turn_id.clone(),
                                     command: e.command,
                                     cwd: e.cwd,
                                     parsed_cmd,

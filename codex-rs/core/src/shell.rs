@@ -269,8 +269,6 @@ fn default_user_shell_from_path(user_shell_path: Option<PathBuf>) -> Shell {
     shell_with_fallback.unwrap_or(ultimate_fallback_shell())
 }
 
-}
-
 #[cfg(test)]
 mod detect_shell_type_tests {
     use super::*;
