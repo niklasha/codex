@@ -369,3 +369,19 @@ macro_rules! skip_if_no_network {
         }
     }};
 }
+
+#[macro_export]
+macro_rules! skip_if_no_sandbox {
+    () => {{
+        if !cfg!(any(target_os = "linux", target_os = "macos")) {
+            println!("ignored: sandboxing is unavailable on this platform; skipping test.");
+            return;
+        }
+    }};
+    ($return_value:expr $(,)?) => {{
+        if !cfg!(any(target_os = "linux", target_os = "macos")) {
+            println!("ignored: sandboxing is unavailable on this platform; skipping test.");
+            return $return_value;
+        }
+    }};
+}
