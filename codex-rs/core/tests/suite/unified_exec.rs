@@ -10,6 +10,7 @@ use codex_core::protocol::EventMsg;
 use codex_core::protocol::ExecCommandSource;
 use codex_core::protocol::Op;
 use codex_core::protocol::SandboxPolicy;
+use codex_core::shell::default_user_shell;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::user_input::UserInput;
 use core_test_support::assert_regex_match;
@@ -215,14 +216,9 @@ async fn unified_exec_emits_exec_command_begin_event() -> Result<()> {
     })
     .await;
 
-    assert_eq!(
-        begin_event.command,
-        vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "/bin/echo hello unified exec".to_string()
-        ]
-    );
+    let expected_command =
+        default_user_shell().derive_exec_args("/bin/echo hello unified exec", true);
+    assert_eq!(begin_event.command, expected_command);
     assert_eq!(begin_event.cwd, cwd.path());
 
     wait_for_event(&codex, |event| matches!(event, EventMsg::TaskComplete(_))).await;
@@ -485,8 +481,14 @@ async fn unified_exec_emits_output_delta_for_write_stdin() -> Result<()> {
     } = builder.build(&server).await?;
 
     let open_call_id = "uexec-open";
+    let shell_path = default_user_shell()
+        .derive_exec_args("echo ready", true)
+        .first()
+        .cloned()
+        .expect("shell path present");
     let open_args = json!({
-        "cmd": "/bin/bash -i",
+        "cmd": format!("{shell_path} -i"),
+        "shell": shell_path,
         "yield_time_ms": 200,
     });
 
@@ -646,14 +648,8 @@ async fn unified_exec_emits_begin_for_write_stdin() -> Result<()> {
     })
     .await;
 
-    assert_eq!(
-        begin_event.command,
-        vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "/bin/sh -c echo ready".to_string()
-        ]
-    );
+    let expected_command = default_user_shell().derive_exec_args("/bin/sh -c echo ready", true);
+    assert_eq!(begin_event.command, expected_command);
     assert_eq!(
         begin_event.interaction_input,
         Some("echo hello".to_string())
@@ -758,18 +754,12 @@ async fn unified_exec_emits_begin_event_for_write_stdin_requests() -> Result<()>
         "expected begin events for the startup command and the write_stdin call"
     );
 
+    let expected_command = default_user_shell().derive_exec_args("/bin/sh -c echo ready", true);
     let open_event = begin_events
         .iter()
         .find(|ev| ev.call_id == open_call_id)
         .expect("missing exec_command begin");
-    assert_eq!(
-        open_event.command,
-        vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "/bin/sh -c echo ready".to_string()
-        ]
-    );
+    assert_eq!(open_event.command, expected_command);
     assert!(
         open_event.interaction_input.is_none(),
         "startup begin events should not include interaction input"
@@ -780,14 +770,7 @@ async fn unified_exec_emits_begin_event_for_write_stdin_requests() -> Result<()>
         .iter()
         .find(|ev| ev.call_id == poll_call_id)
         .expect("missing write_stdin begin");
-    assert_eq!(
-        poll_event.command,
-        vec![
-            "/bin/bash".to_string(),
-            "-lc".to_string(),
-            "/bin/sh -c echo ready".to_string()
-        ]
-    );
+    assert_eq!(poll_event.command, expected_command);
     assert!(
         poll_event.interaction_input.is_none(),
         "poll begin events should omit interaction input"

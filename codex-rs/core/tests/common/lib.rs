@@ -154,7 +154,7 @@ where
     use tokio::time::timeout;
     loop {
         // Allow a bit more time to accommodate async startup work (e.g. config IO, tool discovery)
-        let ev = timeout(wait_time.max(Duration::from_secs(5)), codex.next_event())
+        let ev = timeout(wait_time.max(Duration::from_secs(10)), codex.next_event())
             .await
             .expect("timeout waiting for event")
             .expect("stream ended unexpectedly");
@@ -365,6 +365,22 @@ macro_rules! skip_if_no_network {
             println!(
                 "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
             );
+            return $return_value;
+        }
+    }};
+}
+
+#[macro_export]
+macro_rules! skip_if_no_sandbox {
+    () => {{
+        if !cfg!(any(target_os = "linux", target_os = "macos")) {
+            println!("ignored: sandboxing is unavailable on this platform; skipping test.");
+            return;
+        }
+    }};
+    ($return_value:expr $(,)?) => {{
+        if !cfg!(any(target_os = "linux", target_os = "macos")) {
+            println!("ignored: sandboxing is unavailable on this platform; skipping test.");
             return $return_value;
         }
     }};

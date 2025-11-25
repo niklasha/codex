@@ -21,6 +21,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use serde::Deserialize;
 use serde_json::Value;
 use serde_json::json;
 
@@ -59,19 +60,17 @@ async fn build_codex_with_test_tool(server: &wiremock::MockServer) -> anyhow::Re
     builder.build(server).await
 }
 
-fn assert_parallel_duration(actual: Duration) {
-    // Allow headroom for runtime overhead while still differentiating from serial execution.
-    assert!(
-        actual < Duration::from_millis(750),
-        "expected parallel execution to finish quickly, got {actual:?}"
-    );
-}
-
 fn assert_serial_duration(actual: Duration) {
     assert!(
         actual >= Duration::from_millis(500),
         "expected serial execution to take longer, got {actual:?}"
     );
+}
+
+#[derive(Debug, Deserialize)]
+struct TestSyncToolOutput {
+    status: String,
+    max_concurrency: i32,
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -122,7 +121,7 @@ async fn read_file_tools_run_in_parallel() -> anyhow::Result<()> {
         ev_assistant_message("msg-1", "done"),
         ev_completed("resp-2"),
     ]);
-    mount_sse_sequence(
+    let response_log = mount_sse_sequence(
         &server,
         vec![warmup_first, warmup_second, first_response, second_response],
     )
@@ -130,8 +129,23 @@ async fn read_file_tools_run_in_parallel() -> anyhow::Result<()> {
 
     run_turn(&test, "warm up parallel tool").await?;
 
-    let duration = run_turn_and_measure(&test, "exercise sync tool").await?;
-    assert_parallel_duration(duration);
+    run_turn(&test, "exercise sync tool").await?;
+    let call_one_output = response_log
+        .function_call_output_text("call-1")
+        .expect("call-1 output missing");
+    let call_two_output = response_log
+        .function_call_output_text("call-2")
+        .expect("call-2 output missing");
+    let output_one: TestSyncToolOutput = serde_json::from_str(&call_one_output)?;
+    let output_two: TestSyncToolOutput = serde_json::from_str(&call_two_output)?;
+    assert_eq!(output_one.status, "ok");
+    assert_eq!(output_two.status, "ok");
+    let max_concurrency = output_one.max_concurrency.max(output_two.max_concurrency);
+
+    assert!(
+        max_concurrency >= 2,
+        "expected overlapping sync tool calls, got max_concurrency={max_concurrency}"
+    );
 
     Ok(())
 }

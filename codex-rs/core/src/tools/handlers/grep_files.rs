@@ -18,6 +18,7 @@ pub struct GrepFilesHandler;
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 2000;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+const SORT_BY_MODIFIED_UNAVAILABLE: &str = "sorting by last modified isn't supported";
 
 fn default_limit() -> usize {
     DEFAULT_LIMIT
@@ -117,41 +118,33 @@ async fn run_rg_search(
     limit: usize,
     cwd: &Path,
 ) -> Result<Vec<String>, FunctionCallError> {
-    let mut command = Command::new("rg");
-    command
-        .current_dir(cwd)
-        .arg("--files-with-matches")
-        .arg("--sortr=modified")
-        .arg("--regexp")
-        .arg(pattern)
-        .arg("--no-messages");
+    let initial = execute_rg_command(
+        build_rg_command(pattern, include, search_path, cwd, true),
+        limit,
+    )
+    .await?;
 
-    if let Some(glob) = include {
-        command.arg("--glob").arg(glob);
-    }
+    match initial {
+        RgOutcome::Success(results) => Ok(results),
+        RgOutcome::NoMatches => Ok(Vec::new()),
+        RgOutcome::Failure(stderr) if stderr.contains(SORT_BY_MODIFIED_UNAVAILABLE) => {
+            let fallback = execute_rg_command(
+                build_rg_command(pattern, include, search_path, cwd, false),
+                limit,
+            )
+            .await?;
 
-    command.arg("--").arg(search_path);
-
-    let output = timeout(COMMAND_TIMEOUT, command.output())
-        .await
-        .map_err(|_| {
-            FunctionCallError::RespondToModel("rg timed out after 30 seconds".to_string())
-        })?
-        .map_err(|err| {
-            FunctionCallError::RespondToModel(format!(
-                "failed to launch rg: {err}. Ensure ripgrep is installed and on PATH."
-            ))
-        })?;
-
-    match output.status.code() {
-        Some(0) => Ok(parse_results(&output.stdout, limit)),
-        Some(1) => Ok(Vec::new()),
-        _ => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(FunctionCallError::RespondToModel(format!(
-                "rg failed: {stderr}"
-            )))
+            match fallback {
+                RgOutcome::Success(results) => Ok(results),
+                RgOutcome::NoMatches => Ok(Vec::new()),
+                RgOutcome::Failure(fallback_stderr) => Err(FunctionCallError::RespondToModel(
+                    format!("rg failed: {fallback_stderr}"),
+                )),
+            }
         }
+        RgOutcome::Failure(stderr) => Err(FunctionCallError::RespondToModel(format!(
+            "rg failed: {stderr}"
+        ))),
     }
 }
 
@@ -172,6 +165,64 @@ fn parse_results(stdout: &[u8], limit: usize) -> Vec<String> {
         }
     }
     results
+}
+
+enum RgOutcome {
+    Success(Vec<String>),
+    NoMatches,
+    Failure(String),
+}
+
+fn build_rg_command(
+    pattern: &str,
+    include: Option<&str>,
+    search_path: &Path,
+    cwd: &Path,
+    sort_by_modified: bool,
+) -> Command {
+    let mut command = Command::new("rg");
+    command
+        .current_dir(cwd)
+        .arg("--files-with-matches")
+        .arg("--regexp")
+        .arg(pattern)
+        .arg("--no-messages");
+
+    if sort_by_modified {
+        command.arg("--sortr=modified");
+    }
+
+    if let Some(glob) = include {
+        command.arg("--glob").arg(glob);
+    }
+
+    command.arg("--").arg(search_path);
+    command
+}
+
+async fn execute_rg_command(
+    mut command: Command,
+    limit: usize,
+) -> Result<RgOutcome, FunctionCallError> {
+    let output = timeout(COMMAND_TIMEOUT, command.output())
+        .await
+        .map_err(|_| {
+            FunctionCallError::RespondToModel("rg timed out after 30 seconds".to_string())
+        })?
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "failed to launch rg: {err}. Ensure ripgrep is installed and on PATH."
+            ))
+        })?;
+
+    match output.status.code() {
+        Some(0) => Ok(RgOutcome::Success(parse_results(&output.stdout, limit))),
+        Some(1) => Ok(RgOutcome::NoMatches),
+        _ => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Ok(RgOutcome::Failure(stderr.to_string()))
+        }
+    }
 }
 
 #[cfg(test)]
