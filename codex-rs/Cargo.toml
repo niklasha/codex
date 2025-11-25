@@ -201,7 +201,7 @@ tokio = "1"
 tokio-stream = "0.1.17"
 tokio-test = "0.4"
 tokio-util = "0.7.16"
-rdkafka = { version = "0.36", default-features = false, features = ["cmake-build", "libz", "ssl", "tokio"] }
+rdkafka = { git = "https://github.com/niklasha/rust-rdkafka", branch = "niklasha/openbsd/buildability", default-features = false, features = ["cmake-build", "libz", "ssl", "tokio"] }
 toml = "0.9.5"
 toml_edit = "0.23.5"
 tonic = "0.13.1"
