@@ -19,7 +19,7 @@ use tokio::time::timeout;
 
 const INVALID_OVERRIDE: &[&str] = &["-c", "model_provider"];
 const VALID_OVERRIDES: &[&str] = &["-c", "model_provider=ollama", "-c", "model=gpt-oss:20b"];
-const PROVIDER_NEEDLE: &str = "model_provider=ollama";
+const PROVIDER_NEEDLE: &str = "provider=ModelProviderInfo { name: \"Ollama\"";
 
 #[tokio::test]
 async fn invalid_cli_override_produces_parse_error() -> Result<()> {
@@ -223,7 +223,7 @@ fn write_minimal_config(path: &std::path::Path) -> Result<()> {
     std::fs::write(
         path.join("config.toml"),
         r#"model = "gpt-5.1-codex"
-model_provider_id = "openai"
+model_provider = "openai"
 "#,
     )
     .context("write config.toml")
