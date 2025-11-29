@@ -154,6 +154,7 @@ use std::time::Duration;
 use tokio::select;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
+use toml::Value as TomlValue;
 use tracing::error;
 use tracing::info;
 use tracing::warn;
@@ -191,6 +192,7 @@ pub(crate) struct CodexMessageProcessor {
     outgoing: Arc<OutgoingMessageSender>,
     codex_linux_sandbox_exe: Option<PathBuf>,
     config: Arc<Config>,
+    cli_config_overrides: Arc<Vec<(String, TomlValue)>>,
     conversation_listeners: HashMap<Uuid, oneshot::Sender<()>>,
     active_login: Arc<Mutex<Option<ActiveLogin>>>,
     // Queue of pending interrupt requests per conversation. We reply when TurnAborted arrives.
@@ -238,6 +240,7 @@ impl CodexMessageProcessor {
         codex_linux_sandbox_exe: Option<PathBuf>,
         config: Arc<Config>,
         feedback: CodexFeedback,
+        cli_config_overrides: Arc<Vec<(String, TomlValue)>>,
     ) -> Self {
         Self {
             auth_manager,
@@ -245,6 +248,7 @@ impl CodexMessageProcessor {
             outgoing,
             codex_linux_sandbox_exe,
             config,
+            cli_config_overrides,
             conversation_listeners: HashMap::new(),
             active_login: Arc::new(Mutex::new(None)),
             pending_interrupts: Arc::new(Mutex::new(HashMap::new())),
@@ -1259,7 +1263,13 @@ impl CodexMessageProcessor {
             );
         }
 
-        let config = match derive_config_from_params(overrides, Some(cli_overrides)).await {
+        let config = match derive_config_from_params(
+            self.cli_config_overrides.as_ref(),
+            overrides,
+            Some(cli_overrides),
+        )
+        .await
+        {
             Ok(config) => config,
             Err(err) => {
                 let error = JSONRPCErrorError {
@@ -1309,7 +1319,13 @@ impl CodexMessageProcessor {
             params.developer_instructions,
         );
 
-        let config = match derive_config_from_params(overrides, params.config).await {
+        let config = match derive_config_from_params(
+            self.cli_config_overrides.as_ref(),
+            overrides,
+            params.config,
+        )
+        .await
+        {
             Ok(config) => config,
             Err(err) => {
                 let error = JSONRPCErrorError {
@@ -1543,7 +1559,13 @@ impl CodexMessageProcessor {
                 base_instructions,
                 developer_instructions,
             );
-            match derive_config_from_params(overrides, cli_overrides).await {
+            match derive_config_from_params(
+                self.cli_config_overrides.as_ref(),
+                overrides,
+                cli_overrides,
+            )
+            .await
+            {
                 Ok(config) => config,
                 Err(err) => {
                     let error = JSONRPCErrorError {
@@ -1975,7 +1997,12 @@ impl CodexMessageProcessor {
                     ..Default::default()
                 };
 
-                derive_config_from_params(overrides, Some(cli_overrides)).await
+                derive_config_from_params(
+                    self.cli_config_overrides.as_ref(),
+                    overrides,
+                    Some(cli_overrides),
+                )
+                .await
             }
             None => Ok(self.config.as_ref().clone()),
         };
@@ -3016,16 +3043,16 @@ impl CodexMessageProcessor {
 }
 
 async fn derive_config_from_params(
+    base_cli_overrides: &[(String, TomlValue)],
     overrides: ConfigOverrides,
     cli_overrides: Option<std::collections::HashMap<String, serde_json::Value>>,
 ) -> std::io::Result<Config> {
-    let cli_overrides = cli_overrides
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(k, v)| (k, json_to_toml(v)))
-        .collect();
+    let mut merged_overrides = base_cli_overrides.to_vec();
+    if let Some(cli_overrides) = cli_overrides {
+        merged_overrides.extend(cli_overrides.into_iter().map(|(k, v)| (k, json_to_toml(v))));
+    }
 
-    Config::load_with_cli_overrides(cli_overrides, overrides).await
+    Config::load_with_cli_overrides(merged_overrides, overrides).await
 }
 
 async fn read_summary_from_rollout(
