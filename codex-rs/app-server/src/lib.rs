@@ -45,7 +45,7 @@ pub(crate) const CHANNEL_CAPACITY: usize = 128;
 pub struct SharedState {
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
     pub(crate) config: Arc<Config>,
-    pub(crate) cli_overrides: Vec<(String, TomlValue)>,
+    pub(crate) cli_overrides: Arc<Vec<(String, TomlValue)>>,
     pub(crate) feedback: CodexFeedback,
 }
 
@@ -59,7 +59,7 @@ impl SharedState {
         Self {
             codex_linux_sandbox_exe,
             config,
-            cli_overrides,
+            cli_overrides: Arc::new(cli_overrides),
             feedback,
         }
     }

@@ -185,7 +185,7 @@ async fn run_stdio(shared_state: SharedState) -> IoResult<()> {
             outgoing_message_sender,
             shared_state.codex_linux_sandbox_exe.clone(),
             shared_state.config.clone(),
-            shared_state.cli_overrides.clone(),
+            Arc::clone(&shared_state.cli_overrides),
             shared_state.feedback.clone(),
         );
         async move {
