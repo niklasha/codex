@@ -152,6 +152,19 @@ fn collect_tool_outputs(bodies: &[Value]) -> Result<HashMap<String, ParsedUnifie
     Ok(outputs)
 }
 
+#[cfg(target_os = "openbsd")]
+const DEFAULT_BASH_PATH: &str = "/usr/local/bin/bash";
+#[cfg(not(target_os = "openbsd"))]
+const DEFAULT_BASH_PATH: &str = "/bin/bash";
+
+fn expected_login_command(command: &str) -> Vec<String> {
+    vec![
+        DEFAULT_BASH_PATH.to_string(),
+        "-lc".to_string(),
+        command.to_string(),
+    ]
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_intercepts_apply_patch_exec_command() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -679,14 +692,8 @@ async fn unified_exec_emits_output_delta_for_write_stdin() -> Result<()> {
     } = builder.build(&server).await?;
 
     let open_call_id = "uexec-open";
-    let shell_path = default_user_shell()
-        .derive_exec_args("echo ready", true)
-        .first()
-        .cloned()
-        .expect("shell path present");
     let open_args = json!({
-        "cmd": format!("{shell_path} -i"),
-        "shell": shell_path,
+        "cmd": format!("{DEFAULT_BASH_PATH} -i"),
         "yield_time_ms": 200,
     });
 
@@ -847,7 +854,7 @@ async fn unified_exec_emits_begin_for_write_stdin() -> Result<()> {
     })
     .await;
 
-    let expected_command = default_user_shell().derive_exec_args("bash -i", true);
+    let expected_command = expected_login_command("bash -i");
     assert_eq!(begin_event.command, expected_command);
     assert_eq!(
         begin_event.interaction_input,
@@ -954,7 +961,7 @@ async fn unified_exec_emits_begin_event_for_write_stdin_requests() -> Result<()>
         "expected begin events for the startup command and the write_stdin call"
     );
 
-    let expected_command = default_user_shell().derive_exec_args("bash -i", true);
+    let expected_command = expected_login_command("bash -i");
     let open_event = begin_events
         .iter()
         .find(|ev| ev.call_id == open_call_id)
