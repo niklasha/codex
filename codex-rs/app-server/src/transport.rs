@@ -187,7 +187,6 @@ async fn run_stdio(shared_state: SharedState) -> IoResult<()> {
             shared_state.config.clone(),
             Arc::clone(&shared_state.cli_overrides),
             shared_state.feedback.clone(),
-            shared_state.cli_overrides.clone(),
         );
         async move {
             while let Some(msg) = incoming_rx.recv().await {

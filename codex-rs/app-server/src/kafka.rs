@@ -1,5 +1,6 @@
 use std::io::Error;
 use std::io::Result as IoResult;
+use std::sync::Arc;
 use std::time::Duration;
 
 use codex_app_server_protocol::JSONRPCMessage;
@@ -134,6 +135,7 @@ async fn run_kafka(shared_state: SharedState, options: KafkaOptions) -> IoResult
             outgoing_message_sender,
             shared_state.codex_linux_sandbox_exe.clone(),
             shared_state.config.clone(),
+            Arc::clone(&shared_state.cli_overrides),
             shared_state.feedback.clone(),
         );
         async move {
