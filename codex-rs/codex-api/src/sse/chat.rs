@@ -47,6 +47,7 @@ pub async fn process_chat_sse<S>(
 
     let mut tool_calls: HashMap<String, ToolCallState> = HashMap::new();
     let mut tool_call_order: Vec<String> = Vec::new();
+    let mut tool_call_indices: HashMap<usize, String> = HashMap::new();
     let mut assistant_item: Option<ResponseItem> = None;
     let mut reasoning_item: Option<ResponseItem> = None;
     let mut completed_sent = false;
@@ -149,11 +150,32 @@ pub async fn process_chat_sse<S>(
 
                 if let Some(tool_call_values) = delta.get("tool_calls").and_then(|c| c.as_array()) {
                     for tool_call in tool_call_values {
-                        let id = tool_call
+                        let index = tool_call
+                            .get("index")
+                            .and_then(|i| i.as_u64())
+                            .map(|i| i as usize);
+                        let mut id = tool_call
                             .get("id")
                             .and_then(|i| i.as_str())
-                            .map(str::to_string)
-                            .unwrap_or_else(|| format!("tool-call-{}", tool_call_order.len()));
+                            .map(str::to_string);
+
+                        if let Some(idx) = index {
+                            if let Some(ref call_id) = id {
+                                tool_call_indices.insert(idx, call_id.clone());
+                            } else if let Some(existing) = tool_call_indices.get(&idx) {
+                                id = Some(existing.clone());
+                            }
+                        }
+
+                        let id = id.unwrap_or_else(|| {
+                            if let Some(idx) = index {
+                                let generated = format!("tool-call-{idx}");
+                                tool_call_indices.entry(idx).or_insert_with(|| generated.clone());
+                                generated
+                            } else {
+                                format!("tool-call-{}", tool_call_order.len())
+                            }
+                        });
 
                         let call_state = tool_calls.entry(id.clone()).or_default();
                         if !tool_call_order.contains(&id) {
@@ -429,6 +451,48 @@ mod tests {
                 ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { call_id, name, arguments, .. }),
                 ResponseEvent::Completed { .. }
             ] if call_id == "call_a" && name == "do_a" && arguments == "{ \"foo\":1}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reuses_tool_call_id_when_only_index_is_streamed() {
+        let delta_initial = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_a",
+                        "function": { "name": "do_a", "arguments": "{ \"foo\"" }
+                    }]
+                }
+            }]
+        });
+
+        let delta_follow_up = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": ": 1}" }
+                    }]
+                }
+            }]
+        });
+
+        let finish = json!({
+            "choices": [{
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let body = build_body(&[delta_initial, delta_follow_up, finish]);
+        let events = collect_events(&body).await;
+        assert_matches!(
+            &events[..],
+            [
+                ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { call_id, name, arguments, .. }),
+                ResponseEvent::Completed { .. }
+            ] if call_id == "call_a" && name == "do_a" && arguments == "{ \"foo\": 1}"
         );
     }
 
