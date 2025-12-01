@@ -20,7 +20,6 @@ anyhow = { workspace = true }
 codex-arg0 = { workspace = true }
 codex-common = { workspace = true, features = ["cli"] }
 codex-core = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
 codex-backend-client = { workspace = true }
 codex-file-search = { workspace = true }
 codex-login = { workspace = true }
@@ -29,7 +28,6 @@ codex-app-server-protocol = { workspace = true }
 codex-feedback = { workspace = true }
 codex-utils-json-to-toml = { workspace = true }
 chrono = { workspace = true }
-clap = { workspace = true, features = ["derive"] }
 futures-util = { workspace = true }
 rdkafka = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
