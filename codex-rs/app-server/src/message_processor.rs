@@ -40,7 +40,7 @@ impl MessageProcessor {
         outgoing: OutgoingMessageSender,
         codex_linux_sandbox_exe: Option<PathBuf>,
         config: Arc<Config>,
-        cli_overrides: Vec<(String, TomlValue)>,
+        cli_overrides: Arc<Vec<(String, TomlValue)>>,
         feedback: CodexFeedback,
     ) -> Self {
         let outgoing = Arc::new(outgoing);
@@ -60,8 +60,9 @@ impl MessageProcessor {
             codex_linux_sandbox_exe,
             Arc::clone(&config),
             feedback,
+            Arc::clone(&cli_overrides),
         );
-        let config_api = ConfigApi::new(config.codex_home.clone(), cli_overrides);
+        let config_api = ConfigApi::new(config.codex_home.clone(), (*cli_overrides).clone());
 
         Self {
             outgoing,

@@ -267,11 +267,19 @@ pub fn built_in_model_providers() -> HashMap<String, ModelProviderInfo> {
         ),
         (
             OLLAMA_OSS_PROVIDER_ID,
-            create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Chat),
+            {
+                let mut provider = create_oss_provider(DEFAULT_OLLAMA_PORT, WireApi::Chat);
+                provider.name = "Ollama".into();
+                provider
+            },
         ),
         (
             LMSTUDIO_OSS_PROVIDER_ID,
-            create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses),
+            {
+                let mut provider = create_oss_provider(DEFAULT_LMSTUDIO_PORT, WireApi::Responses);
+                provider.name = "LM Studio".into();
+                provider
+            },
         ),
     ]
     .into_iter()
