@@ -433,6 +433,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reuses_tool_call_id_when_only_index_is_streamed() {
+        let delta_initial = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_a",
+                        "function": { "name": "do_a", "arguments": "{ \"foo\"" }
+                    }]
+                }
+            }]
+        });
+
+        let delta_follow_up = json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "arguments": ": 1}" }
+                    }]
+                }
+            }]
+        });
+
+        let finish = json!({
+            "choices": [{
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let body = build_body(&[delta_initial, delta_follow_up, finish]);
+        let events = collect_events(&body).await;
+        assert_matches!(
+            &events[..],
+            [
+                ResponseEvent::OutputItemDone(ResponseItem::FunctionCall { call_id, name, arguments, .. }),
+                ResponseEvent::Completed { .. }
+            ] if call_id == "call_a" && name == "do_a" && arguments == "{ \"foo\": 1}"
+        );
+    }
+
+    #[tokio::test]
     async fn emits_tool_calls_even_when_content_and_reasoning_present() {
         let delta_content_and_tools = json!({
             "choices": [{
