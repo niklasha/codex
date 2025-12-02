@@ -121,6 +121,7 @@ pub(crate) async fn assess_command(
         tools: Vec::new(),
         parallel_tool_calls: false,
         base_instructions_override: Some(system_prompt),
+        developer_instructions: None,
         output_schema: Some(sandbox_assessment_schema()),
     };
 

@@ -2071,6 +2071,7 @@ async fn run_turn(
         tools: router.specs(),
         parallel_tool_calls,
         base_instructions_override: base_instructions,
+        developer_instructions: turn_context.developer_instructions.clone(),
         output_schema: turn_context.final_output_json_schema.clone(),
     };
 
