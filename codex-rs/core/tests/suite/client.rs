@@ -855,7 +855,7 @@ async fn includes_developer_instructions_message_in_request() {
     let mut config = load_default_config_for_test(&codex_home);
     config.model_provider = model_provider;
     config.user_instructions = Some("be nice".to_string());
-    config.developer_instructions = Some("be useful".to_string());
+    config.developer_instructions = Some("developer-marker-123".to_string());
 
     let conversation_manager =
         ConversationManager::with_auth(CodexAuth::from_api_key("Test API Key"));
@@ -879,14 +879,17 @@ async fn includes_developer_instructions_message_in_request() {
     let request = resp_mock.single_request();
     let request_body = request.body_json();
 
+    let instructions_text = request_body["instructions"].as_str().unwrap();
     assert!(
-        !request_body["instructions"]
-            .as_str()
-            .unwrap()
-            .contains("be nice")
+        !instructions_text.contains("be nice"),
+        "user instructions leaked into system instructions: {instructions_text}"
+    );
+    assert!(
+        instructions_text.contains("developer-marker-123"),
+        "developer instructions missing from system instructions: {instructions_text}"
     );
     assert_message_role(&request_body["input"][0], "developer");
-    assert_message_equals(&request_body["input"][0], "be useful");
+    assert_message_equals(&request_body["input"][0], "developer-marker-123");
     assert_message_role(&request_body["input"][1], "user");
     assert_message_starts_with(&request_body["input"][1], "# AGENTS.md instructions for ");
     assert_message_ends_with(&request_body["input"][1], "</INSTRUCTIONS>");
@@ -898,6 +901,79 @@ async fn includes_developer_instructions_message_in_request() {
     assert_message_role(&request_body["input"][2], "user");
     assert_message_starts_with(&request_body["input"][2], "<environment_context>");
     assert_message_ends_with(&request_body["input"][2], "</environment_context>");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_system_instructions_include_developer_overrides() {
+    skip_if_no_network!();
+
+    let server = MockServer::start().await;
+    let template = ResponseTemplate::new(200)
+        .insert_header("content-type", "text/event-stream")
+        .set_body_raw(
+            r#"data: {"choices":[{"delta":{}}]}
+
+data: [DONE]
+
+"#,
+            "text/event-stream",
+        );
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(template)
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut model_provider = built_in_model_providers()["openai"].clone();
+    model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    model_provider.wire_api = WireApi::Chat;
+
+    let codex_home = TempDir::new().unwrap();
+    let mut config = load_default_config_for_test(&codex_home);
+    config.model_provider = model_provider;
+    config.developer_instructions = Some("developer-marker-123".to_string());
+
+    let conversation_manager =
+        ConversationManager::with_auth(CodexAuth::from_api_key("Test API Key"));
+    let codex = conversation_manager
+        .new_conversation(config)
+        .await
+        .expect("create new conversation")
+        .conversation;
+
+    codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: "hello".into(),
+            }],
+        })
+        .await
+        .unwrap();
+
+    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TaskComplete(_))).await;
+
+    let requests = server
+        .received_requests()
+        .await
+        .expect("chat request missing");
+    let body: serde_json::Value = requests[0]
+        .body_json()
+        .expect("chat request missing json body");
+    let messages = body["messages"]
+        .as_array()
+        .expect("chat payload missing messages");
+    assert!(!messages.is_empty(), "chat payload missing system message");
+    let system_message = &messages[0];
+    assert_message_role(system_message, "system");
+    let system_text = system_message["content"]
+        .as_str()
+        .expect("system message content was not text");
+    assert!(
+        system_text.contains("developer-marker-123"),
+        "developer instructions missing from chat system message: {system_text}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

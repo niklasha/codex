@@ -39,6 +39,9 @@ pub struct Prompt {
     /// Optional override for the built-in BASE_INSTRUCTIONS.
     pub base_instructions_override: Option<String>,
 
+    /// Optional instructions provided by developer overrides.
+    pub developer_instructions: Option<String>,
+
     /// Optional the output schema for the model's response.
     pub output_schema: Option<Value>,
 }
@@ -58,14 +61,30 @@ impl Prompt {
             ToolSpec::Freeform(f) => f.name == "apply_patch",
             _ => false,
         });
-        if self.base_instructions_override.is_none()
+        let mut instructions = if self.base_instructions_override.is_none()
             && model.needs_special_apply_patch_instructions
             && !is_apply_patch_tool_present
         {
             Cow::Owned(format!("{base}\n{APPLY_PATCH_TOOL_INSTRUCTIONS}"))
         } else {
             Cow::Borrowed(base)
+        };
+
+        if let Some(dev) = self
+            .developer_instructions
+            .as_deref()
+            .filter(|text| !text.trim().is_empty())
+        {
+            let mut combined = instructions.into_owned();
+            if !combined.ends_with('\n') {
+                combined.push('\n');
+            }
+            combined.push('\n');
+            combined.push_str(dev);
+            instructions = Cow::Owned(combined);
         }
+
+        instructions
     }
 
     pub(crate) fn get_formatted_input(&self) -> Vec<ResponseItem> {
@@ -323,6 +342,18 @@ mod tests {
             let full = prompt.get_full_instructions(&model_family);
             assert_eq!(full, expected);
         }
+    }
+
+    #[test]
+    fn appends_developer_instructions_to_system_prompt() {
+        let prompt = Prompt {
+            developer_instructions: Some("developer-marker-123".to_string()),
+            ..Default::default()
+        };
+        let model_family = find_family_for_model("gpt-5.1").expect("known model slug");
+        let full = prompt.get_full_instructions(&model_family);
+        assert!(full.ends_with("developer-marker-123"));
+        assert!(full.contains("developer-marker-123"));
     }
 
     #[test]
