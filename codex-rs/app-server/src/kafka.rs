@@ -10,10 +10,14 @@ use rdkafka::consumer::CommitMode;
 use rdkafka::consumer::Consumer;
 use rdkafka::consumer::StreamConsumer;
 use rdkafka::error::KafkaError;
+use rdkafka::message::Header;
 use rdkafka::message::Message;
+use rdkafka::message::OwnedHeaders;
 use rdkafka::producer::FutureProducer;
 use rdkafka::producer::FutureRecord;
 use rdkafka::producer::Producer;
+use serde_json::Map;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tracing::debug;
 use tracing::info;
@@ -212,13 +216,19 @@ async fn run_kafka(shared_state: SharedState, options: KafkaOptions) -> IoResult
                 warn!("failed to convert outgoing message to JSON value");
                 continue;
             };
+            let metadata = KafkaMetadata::from_message(&message, &value);
             match serde_json::to_string(&value) {
                 Ok(json) => {
-                    let key = kafka_key(&message);
                     let mut record = FutureRecord::to(&output_topic).payload(&json);
-                    if let Some(ref key) = key {
+                    let kafka_key_value = metadata
+                        .conversation_id
+                        .clone()
+                        .or_else(|| kafka_key(&message));
+                    if let Some(ref key) = kafka_key_value {
                         record = record.key(key);
                     }
+                    let headers = metadata.into_headers();
+                    record = record.headers(headers);
                     if let Err((err, _)) = producer.send(record, Duration::from_secs(0)).await {
                         warn!(error = ?err, topic = %output_topic, "failed to send kafka message");
                     }
@@ -280,4 +290,250 @@ fn request_id_to_string(id: &codex_app_server_protocol::RequestId) -> String {
 
 fn kafka_error(err: KafkaError) -> Error {
     Error::other(err.to_string())
+}
+
+const SCHEMA_VERSION: &str = codex_app_server_protocol::JSONRPC_VERSION;
+
+#[derive(Debug, Default)]
+struct KafkaMetadata {
+    conversation_id: Option<String>,
+    message_id: Option<String>,
+    parent_id: Option<String>,
+    role: Option<String>,
+    method: Option<String>,
+    error: Option<String>,
+}
+
+impl KafkaMetadata {
+    fn from_message(message: &OutgoingMessage, json: &Value) -> Self {
+        let metadata = Self {
+            conversation_id: extract_conversation_id(json),
+            message_id: extract_message_id(json, message),
+            parent_id: extract_parent_id(json),
+            role: extract_role(json),
+            method: extract_top_level_method(json),
+            error: match message {
+                OutgoingMessage::Error(err) => Some(err.error.message.clone()),
+                _ => None,
+            },
+        };
+        metadata
+    }
+
+    fn into_headers(self) -> OwnedHeaders {
+        let mut headers = OwnedHeaders::new();
+        headers = headers.insert(Header {
+            key: "schema-version",
+            value: Some(SCHEMA_VERSION),
+        });
+
+        if let Some(value) = self.conversation_id.as_deref() {
+            headers = headers.insert(Header {
+                key: "conversation-id",
+                value: Some(value),
+            });
+        }
+
+        if let Some(value) = self.message_id.as_deref() {
+            headers = headers.insert(Header {
+                key: "message-id",
+                value: Some(value),
+            });
+        }
+
+        if let Some(value) = self.parent_id.as_deref() {
+            headers = headers.insert(Header {
+                key: "parent-id",
+                value: Some(value),
+            });
+        }
+
+        if let Some(value) = self.role.as_deref() {
+            headers = headers.insert(Header {
+                key: "role",
+                value: Some(value),
+            });
+        }
+
+        if let Some(value) = self.method.as_deref() {
+            headers = headers.insert(Header {
+                key: "method",
+                value: Some(value),
+            });
+        }
+
+        if let Some(value) = self.error.as_deref() {
+            headers = headers.insert(Header {
+                key: "error",
+                value: Some(value),
+            });
+        }
+
+        headers
+    }
+}
+
+fn extract_conversation_id(json: &Value) -> Option<String> {
+    match json {
+        Value::Object(obj) => lookup_string(obj, &["conversationId", "threadId"])
+            .or_else(|| {
+                obj.get("params")
+                    .and_then(|value| value.as_object())
+                    .and_then(|params| lookup_conversation_in_container(params))
+            })
+            .or_else(|| {
+                obj.get("result")
+                    .and_then(|value| value.as_object())
+                    .and_then(|result| lookup_conversation_in_container(result))
+            }),
+        _ => None,
+    }
+}
+
+fn lookup_conversation_in_container(map: &Map<String, Value>) -> Option<String> {
+    lookup_string(map, &["conversationId", "threadId"])
+        .or_else(|| {
+            map.get("thread")
+                .and_then(|value| value.as_object())
+                .and_then(|thread| lookup_string(thread, &["id"]))
+        })
+        .or_else(|| {
+            map.get("turn")
+                .and_then(|value| value.as_object())
+                .and_then(|turn| lookup_string(turn, &["threadId"]))
+        })
+}
+
+fn extract_message_id(json: &Value, message: &OutgoingMessage) -> Option<String> {
+    match json {
+        Value::Object(obj) => match message {
+            OutgoingMessage::Request(_)
+            | OutgoingMessage::Response(_)
+            | OutgoingMessage::Error(_) => obj.get("id").and_then(value_to_string),
+            OutgoingMessage::Notification(_) | OutgoingMessage::AppServerNotification(_) => obj
+                .get("params")
+                .and_then(|value| value.as_object())
+                .and_then(|params| {
+                    params.get("id").and_then(value_to_string).or_else(|| {
+                        params
+                            .get("msg")
+                            .and_then(|msg| msg.as_object())
+                            .and_then(|msg| msg.get("id"))
+                            .and_then(value_to_string)
+                    })
+                }),
+        },
+        _ => None,
+    }
+}
+
+fn extract_parent_id(json: &Value) -> Option<String> {
+    match json {
+        Value::Object(obj) => obj
+            .get("params")
+            .and_then(|value| value.as_object())
+            .and_then(|params| {
+                lookup_string(
+                    params,
+                    &["parentId", "parentThreadId", "parentConversationId"],
+                )
+            })
+            .or_else(|| {
+                obj.get("result")
+                    .and_then(|value| value.as_object())
+                    .and_then(|result| {
+                        lookup_string(
+                            result,
+                            &["parentId", "parentThreadId", "parentConversationId"],
+                        )
+                    })
+            }),
+        _ => None,
+    }
+}
+
+fn extract_role(json: &Value) -> Option<String> {
+    let method = json.get("method").and_then(|value| value.as_str())?;
+    if !method.starts_with("codex/event/") {
+        return None;
+    }
+    let params = json.get("params").and_then(|value| value.as_object())?;
+    let msg = params.get("msg").and_then(|value| value.as_object())?;
+    let event_type = msg.get("type").and_then(|value| value.as_str())?;
+    if event_type.starts_with("agent_") {
+        Some("assistant".to_string())
+    } else if event_type.starts_with("user_") {
+        Some("user".to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_top_level_method(json: &Value) -> Option<String> {
+    json.get("method")
+        .and_then(|value| value.as_str())
+        .map(|s| s.to_string())
+}
+
+fn lookup_string(map: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| map.get(*key).and_then(value_to_string))
+}
+
+fn value_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) => Some(text.clone()),
+        Value::Number(num) => Some(num.to_string()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::outgoing_message::OutgoingNotification;
+    use serde_json::json;
+
+    #[test]
+    fn extracts_metadata_from_codex_event_notification() {
+        let params = json!({
+            "conversationId": "conv-123",
+            "id": "event-42",
+            "msg": {
+                "type": "agent_message",
+                "message": "hello"
+            }
+        });
+        let notification = OutgoingNotification {
+            method: "codex/event/agent_message".to_string(),
+            params: Some(params),
+        };
+        let message = OutgoingMessage::Notification(notification);
+        let value = serde_json::to_value(&message).expect("serialize notification");
+        let metadata = KafkaMetadata::from_message(&message, &value);
+        assert_eq!(metadata.conversation_id.as_deref(), Some("conv-123"));
+        assert_eq!(metadata.message_id.as_deref(), Some("event-42"));
+        assert_eq!(metadata.role.as_deref(), Some("assistant"));
+        assert_eq!(
+            metadata.method.as_deref(),
+            Some("codex/event/agent_message")
+        );
+    }
+
+    #[test]
+    fn extracts_conversation_from_response_result() {
+        let response = OutgoingMessage::Response(crate::outgoing_message::OutgoingResponse {
+            id: codex_app_server_protocol::RequestId::String("req-1".to_string()),
+            result: json!({
+                "conversationId": "conv-abc",
+                "status": "ok"
+            }),
+        });
+        let value = serde_json::to_value(&response).expect("serialize response");
+        let metadata = KafkaMetadata::from_message(&response, &value);
+        assert_eq!(metadata.conversation_id.as_deref(), Some("conv-abc"));
+        assert_eq!(metadata.message_id.as_deref(), Some("req-1"));
+        assert!(metadata.role.is_none());
+        assert!(metadata.method.is_none());
+    }
 }

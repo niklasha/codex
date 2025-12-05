@@ -149,11 +149,30 @@ pub async fn process_chat_sse<S>(
 
                 if let Some(tool_call_values) = delta.get("tool_calls").and_then(|c| c.as_array()) {
                     for tool_call in tool_call_values {
-                        let id = tool_call
+                        let mut id = tool_call
                             .get("id")
                             .and_then(|i| i.as_str())
-                            .map(str::to_string)
-                            .unwrap_or_else(|| format!("tool-call-{}", tool_call_order.len()));
+                            .map(str::to_string);
+
+                        if let Some(idx) = index {
+                            if let Some(ref call_id) = id {
+                                tool_call_indices.insert(idx, call_id.clone());
+                            } else if let Some(existing) = tool_call_indices.get(&idx) {
+                                id = Some(existing.clone());
+                            }
+                        }
+
+                        let id = id.unwrap_or_else(|| {
+                            if let Some(idx) = index {
+                                let generated = format!("tool-call-{idx}");
+                                tool_call_indices
+                                    .entry(idx)
+                                    .or_insert_with(|| generated.clone());
+                                generated
+                            } else {
+                                format!("tool-call-{}", tool_call_order.len())
+                            }
+                        });
 
                         let call_state = tool_calls.entry(id.clone()).or_default();
                         if !tool_call_order.contains(&id) {
